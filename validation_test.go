@@ -172,8 +172,8 @@ func TestHasSufficientDataForCreation(t *testing.T) {
 			want:    true,
 		},
 		{
-			name:    "has insurance (bin + cardHolderId)",
-			patient: InboundPatientIdRequest{Bin: "004336", CardHolderId: "123456789"},
+			name:    "has insurance (bin + cardHolderId + pcn)",
+			patient: InboundPatientIdRequest{Bin: "004336", CardHolderId: "123456789", PCN: "RXPCN01"},
 			want:    true,
 		},
 		{
@@ -183,7 +183,17 @@ func TestHasSufficientDataForCreation(t *testing.T) {
 		},
 		{
 			name:    "insurance missing cardHolderId",
-			patient: InboundPatientIdRequest{Bin: "004336"},
+			patient: InboundPatientIdRequest{Bin: "004336", PCN: "RXPCN01"},
+			want:    false,
+		},
+		{
+			name:    "insurance missing PCN (bin + cardHolderId only)",
+			patient: InboundPatientIdRequest{Bin: "004336", CardHolderId: "123456789"},
+			want:    false,
+		},
+		{
+			name:    "insurance missing bin",
+			patient: InboundPatientIdRequest{CardHolderId: "123456789", PCN: "RXPCN01"},
 			want:    false,
 		},
 		{

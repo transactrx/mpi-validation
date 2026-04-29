@@ -93,6 +93,7 @@ func HasSufficientDataForCreation(patient *InboundPatientIdRequest) bool {
 
 	bin := StripNonAlphanumeric(patient.Bin)
 	cardHolderId := StripNonAlphanumeric(patient.CardHolderId)
+	pcn := StripNonAlphanumeric(patient.PCN)
 
 	pharmacyNpi := StripNonAlphanumeric(patient.PharmacyNpi)
 	if !IsValidNPI(pharmacyNpi) {
@@ -106,7 +107,11 @@ func HasSufficientDataForCreation(patient *InboundPatientIdRequest) bool {
 
 	hasPhone := phone != ""
 	hasAddress := street != "" || zip != ""
-	hasInsurance := bin != "" && cardHolderId != ""
+	// PCN is required so that insurance can be persisted: the storage key
+	// (GetInPatientInsuranceKey in masterPatientIndex) requires bin+chid+pcn.
+	// Accepting bin+chid alone here would let validation pass and then store
+	// no insurance — the thin-patient bug.
+	hasInsurance := bin != "" && cardHolderId != "" && pcn != ""
 	hasPharmacy := pharmacyNpi != "" && rxPatientId != ""
 
 	return hasPhone || hasAddress || hasInsurance || hasPharmacy
