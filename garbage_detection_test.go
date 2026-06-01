@@ -55,6 +55,124 @@ func TestClassifyGarbage_PetNames(t *testing.T) {
 	}
 }
 
+func TestClassifyGarbage_TrailingPunctuationLeak(t *testing.T) {
+	// Real leaked forms: the raw firstName had trailing punctuation that defeated the
+	// $-anchored suffix when matched against the raw value, but the MPI strips
+	// non-alphanumerics before storing -- so "eros canine." became "eroscanine" in the
+	// index. The fix matches the suffix against StripNonAlphanumeric(firstName).
+	tests := []struct {
+		name      string
+		firstName string
+		lastName  string
+	}{
+		{"canine trailing period", "eros canine.", ""},
+		{"canine parens", "eros (canine)", ""},
+		{"k9 trailing period", "alli k9.", ""},
+		{"feline trailing space-dot", "whiskers feline .", ""},
+		{"dog trailing punct", "rex dog!", ""},
+		{"canine with hyphen", "max-canine", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClassifyGarbage(tt.firstName, tt.lastName, "20200101", "", "", "")
+			if got != "pet" {
+				t.Errorf("ClassifyGarbage(%q) = %q, want \"pet\" (normalized form is a pet name)", tt.firstName, got)
+			}
+		})
+	}
+}
+
+func TestClassifyGarbage_SyntheticDigits(t *testing.T) {
+	// 3+ digit run + NO contact = synthetic/test data (Faker surname + random digits).
+	cases := []struct{ fn, ln string }{
+		{"mary", "kunze718832"},
+		{"makayla", "goodwin116400"},
+		{"rosalic193564", "velasco"},
+		{"henrylic92904", "mercado"},
+		{"alice3214", "friedman"},
+	}
+	for _, c := range cases {
+		if got := ClassifyGarbage(c.fn, c.ln, "19940723", "", "", ""); got != "synthetic_digits" {
+			t.Errorf("ClassifyGarbage(%q,%q)=%q, want synthetic_digits", c.fn, c.ln, got)
+		}
+	}
+	// A digit-run name WITH contact data is a REAL patient with a dirty field, not
+	// garbage. Real given names (joan104, jose134, robert308) and real surnames
+	// (padilla4096, han06251924) both occur on contactable patients -- must NOT match.
+	withContact := []struct{ fn, ln string }{
+		{"joan104", "palagonia"}, {"jose134", "cruz"}, {"robert308", "preusser"},
+		{"maria", "padilla4096"}, {"young", "han06251924"},
+	}
+	for _, c := range withContact {
+		if got := ClassifyGarbage(c.fn, c.ln, "19400716", "123 Main St", "10001", "2125551234"); got != "" {
+			t.Errorf("ClassifyGarbage(%q,%q) w/ contact = %q, want empty (real patient, dirty field)", c.fn, c.ln, got)
+		}
+	}
+	// Real dedup-suffixed names (single/double trailing digit) must NOT match.
+	for _, fn := range []string{"dorothy1", "maria1", "frances27", "carmen27", "joan10"} {
+		if got := ClassifyGarbage(fn, "smith", "19800115", "123 Main St", "10001", "2125551234"); got != "" {
+			t.Errorf("ClassifyGarbage(%q)=%q, want empty (real dedup-suffixed name)", fn, got)
+		}
+	}
+}
+
+func TestClassifyGarbage_ClaimBlob(t *testing.T) {
+	blob := "cbbowtieallergycm375huntingtondrsteccnsanmarinococacp91108cq8586994949hnkvontiehl"
+	if got := ClassifyGarbage(blob, "bowtieallergy", "19900101", "", "", ""); got != "claim_blob" {
+		t.Errorf("long blob firstName = %q, want claim_blob", got)
+	}
+	// NCPDP control char in raw value.
+	if got := ClassifyGarbage("john\x1cdoe", "smith", "19900101", "", "", ""); got != "claim_blob" {
+		t.Errorf("control-char name = %q, want claim_blob", got)
+	}
+	// A long but legitimate compound name under the ceiling must pass.
+	if got := ClassifyGarbage("maria de los angeles", "smith", "19900115", "123 Main St", "10001", "2125551234"); got != "" {
+		t.Errorf("compound real name = %q, want empty", got)
+	}
+}
+
+func TestClassifyGarbage_JunkPlaceholder(t *testing.T) {
+	for _, fn := range []string{"test", "patient", "unknown", "noname", "sample", "none", "xxx", "donotuse", "zztest", "newborn"} {
+		if got := ClassifyGarbage(fn, "smith", "20240101", "", "", ""); got != "junk_placeholder" {
+			t.Errorf("ClassifyGarbage(%q)=%q, want junk_placeholder", fn, got)
+		}
+	}
+	// "baby" is a real given name -- must NOT be flagged.
+	if got := ClassifyGarbage("baby", "kuriakose", "19620706", "", "", ""); got != "" {
+		t.Errorf("ClassifyGarbage(baby)=%q, want empty (real Kerala/Filipino name)", got)
+	}
+	// "na" is the N/A placeholder but also a real Korean/Vietnamese given name.
+	// Reject only when no contact corroborates; with contact it's a real person.
+	if got := ClassifyGarbage("na", "smith", "20240101", "", "", ""); got != "junk_placeholder" {
+		t.Errorf("ClassifyGarbage(na) no contact = %q, want junk_placeholder", got)
+	}
+	if got := ClassifyGarbage("na", "yi", "19380501", "123 Main St", "10001", "2125551234"); got != "" {
+		t.Errorf("ClassifyGarbage(na) w/ contact = %q, want empty (real name)", got)
+	}
+}
+
+func TestClassifyGarbage_SurnamesMustNotMatch(t *testing.T) {
+	// Real human surnames that END in a pet suffix. We deliberately do NOT match the
+	// species regex against lastName, so these legitimate families must pass. Validated
+	// against 250k real human-signal patients pulled from production OpenSearch.
+	surnames := []string{
+		"apfel", "stifel", "stiefel", "teufel", "scheffel", "christoffel", "zweifel",
+		"werfel", "duffel", "warfel", "stoffel", "zipfel", "woelfel", "manteuffel",
+		"bacani", "pellicani", "ascani", "carcani", "policani",
+		"whitehorse", "roanhorse", "alequin",
+	}
+	for _, ln := range surnames {
+		t.Run(ln, func(t *testing.T) {
+			// Even with no contact data + Jan-1 DOB (worst case for ambiguous path),
+			// a real firstName + these surnames must not be flagged.
+			got := ClassifyGarbage("mary", ln, "19400101", "", "", "")
+			if got != "" {
+				t.Errorf("ClassifyGarbage(%q, %q) = %q, want empty (real surname)", "mary", ln, got)
+			}
+		})
+	}
+}
+
 func TestClassifyGarbage_MustNotMatch(t *testing.T) {
 	tests := []struct {
 		name      string
