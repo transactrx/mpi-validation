@@ -40,13 +40,6 @@ var petPrefixRegex = regexp.MustCompile(`(?i)^(k9|dog)\s`)
 //   - "can$" -- truncated canine, but matches "Duncan"
 var ambiguousPetRegex = regexp.MustCompile(`(?i)(fe|cat|can)$`)
 
-// multiDigitRegex matches a run of 3+ consecutive digits. Real names never contain
-// one; this run is the signature of synthetic/test data (Faker surname + random
-// digits like "kunze718832"). Validated against 250k real human-signal patients:
-// only 38/250k hit, and those were themselves garbage. NOTE: a single trailing digit
-// is NOT flagged -- real dedup-suffixed names exist (dorothy1, maria1, frances27).
-var multiDigitRegex = regexp.MustCompile(`[0-9]{3,}`)
-
 // maxNameLen is the cleaned-name length above which a value is treated as a claim
 // blob (a whole NCPDP segment dumped into the name field). Real firstName cleaned
 // length is p99.9=12 in a 250k sample; only 4/250k exceeded 25. 40 is a safe ceiling.
@@ -90,7 +83,6 @@ func hasNCPDPControlChars(s string) bool {
 // Return values:
 //   - "pet" -- matched primary pet name regex (unambiguous animal species)
 //   - "claim_blob" -- a raw NCPDP segment leaked into a name field (length / control chars)
-//   - "synthetic_digits" -- name has a 3+ digit run AND no contact data (synthetic/test)
 //   - "junk_placeholder" -- exact placeholder token (test, unknown, newborn, ...)
 //   - "system_statsafe" -- pharmaceutical data artifact
 //   - "institutional_housestock" -- house stock institutional account
@@ -120,21 +112,16 @@ func ClassifyGarbage(firstName, lastName, dob, street, zip, phone string) string
 		return "claim_blob"
 	}
 
-	// 3. Synthetic/test data -- a run of 3+ digits in the name, with corroboration.
-	// A 3+ digit run is a SUSPICIOUS name signal, not proof of garbage on its own:
-	// REAL patients arrive with numeric suffixes polluting either field -- real given
-	// names (joan104, jose134, robert308, james1212, michael00000) and real surnames
-	// (padilla4096, han06251924) alike. Those records all carry real contact data.
-	// The synthetic/test/claim-blob records we actually want to block come in
-	// CONTACTLESS. So follow the holistic rule: a digit-run name is garbage only when
-	// no contact signal (phone/address) corroborates it. With contact, treat it as a
-	// real patient with a dirty field and let it through.
+	// NOTE: digit-run in a name is NOT a garbage signal and is deliberately NOT gated.
+	// Investigation (2026-06-02, prod) proved the "synthetic_digits" class was
+	// overwhelmingly REAL long-term-care patients: LTC pharmacies append the insurance
+	// member ID into the name field (e.g. "PADILLA (16669)" -> "padilla16669"), and LTC
+	// residents legitimately have no street/zip/phone (they live in a facility). The old
+	// "digit-run AND no contact" rule therefore rejected real Medicare-D LTC patients.
+	// There is no reliable standalone signal for the genuinely-synthetic remainder, so
+	// the gate is dropped. hasContact is still computed below for the ambiguous-token rule.
 	hasContact := strings.TrimSpace(street) != "" || strings.TrimSpace(zip) != "" ||
 		strings.TrimSpace(phone) != ""
-	if !hasContact &&
-		(multiDigitRegex.MatchString(firstNameClean) || multiDigitRegex.MatchString(lastNameClean)) {
-		return "synthetic_digits"
-	}
 
 	lower := strings.ToLower(strings.TrimSpace(firstName))
 	lowerLast := strings.ToLower(strings.TrimSpace(lastName))

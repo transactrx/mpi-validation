@@ -82,36 +82,32 @@ func TestClassifyGarbage_TrailingPunctuationLeak(t *testing.T) {
 	}
 }
 
-func TestClassifyGarbage_SyntheticDigits(t *testing.T) {
-	// 3+ digit run + NO contact = synthetic/test data (Faker surname + random digits).
-	cases := []struct{ fn, ln string }{
-		{"mary", "kunze718832"},
-		{"makayla", "goodwin116400"},
-		{"rosalic193564", "velasco"},
-		{"henrylic92904", "mercado"},
-		{"alice3214", "friedman"},
+func TestClassifyGarbage_DigitRunNotGarbage(t *testing.T) {
+	// A digit run in a name is NOT a garbage signal (the old "synthetic_digits" gate
+	// was dropped 2026-06-02). Prod proved these are overwhelmingly REAL long-term-care
+	// patients: LTC pharmacies append the insurance member ID into the name field
+	// ("PADILLA (16669)" -> "padilla16669"), and LTC residents legitimately have no
+	// street/zip/phone. So digit-run names must pass WITH OR WITHOUT contact data.
+	noContact := []struct{ fn, ln string }{
+		{"rita", "padilla16669"},   // real Grane PBM LTC patient, member ID in surname
+		{"trinidad", "martinez16991"},
+		{"carolyn1943", "scheer"},  // real DOB-year suffix
+		{"kathryn519", "blum"},
+		{"mary", "kunze718832"},    // formerly flagged as "synthetic" -- not gated anymore
 	}
-	for _, c := range cases {
-		if got := ClassifyGarbage(c.fn, c.ln, "19940723", "", "", ""); got != "synthetic_digits" {
-			t.Errorf("ClassifyGarbage(%q,%q)=%q, want synthetic_digits", c.fn, c.ln, got)
+	for _, c := range noContact {
+		if got := ClassifyGarbage(c.fn, c.ln, "19430615", "", "", ""); got != "" {
+			t.Errorf("ClassifyGarbage(%q,%q) no contact = %q, want empty (real LTC/dirty-field patient)", c.fn, c.ln, got)
 		}
 	}
-	// A digit-run name WITH contact data is a REAL patient with a dirty field, not
-	// garbage. Real given names (joan104, jose134, robert308) and real surnames
-	// (padilla4096, han06251924) both occur on contactable patients -- must NOT match.
+	// And the same names with contact data also pass.
 	withContact := []struct{ fn, ln string }{
 		{"joan104", "palagonia"}, {"jose134", "cruz"}, {"robert308", "preusser"},
 		{"maria", "padilla4096"}, {"young", "han06251924"},
 	}
 	for _, c := range withContact {
 		if got := ClassifyGarbage(c.fn, c.ln, "19400716", "123 Main St", "10001", "2125551234"); got != "" {
-			t.Errorf("ClassifyGarbage(%q,%q) w/ contact = %q, want empty (real patient, dirty field)", c.fn, c.ln, got)
-		}
-	}
-	// Real dedup-suffixed names (single/double trailing digit) must NOT match.
-	for _, fn := range []string{"dorothy1", "maria1", "frances27", "carmen27", "joan10"} {
-		if got := ClassifyGarbage(fn, "smith", "19800115", "123 Main St", "10001", "2125551234"); got != "" {
-			t.Errorf("ClassifyGarbage(%q)=%q, want empty (real dedup-suffixed name)", fn, got)
+			t.Errorf("ClassifyGarbage(%q,%q) w/ contact = %q, want empty", c.fn, c.ln, got)
 		}
 	}
 }
