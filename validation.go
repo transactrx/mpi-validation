@@ -220,3 +220,21 @@ func ValidateGender(gender string) error {
 	}
 	return nil
 }
+
+// testPayorNameRe matches a "test" token at a word boundary, case-insensitive.
+// The \b anchor means it fires on "Test", "TEST", "Testing" but NOT on a "test"
+// substring inside a real word ("greatest", "latest", "contest") — so it won't
+// false-positive on legitimate plan names. RULEDATA plan names are a controlled
+// vocabulary and the test/QA payors follow this convention consistently
+// (e.g. "QS/1 Test Claims", "PowerLine Test", "Express Scripts Test", "TEST PLAN").
+var testPayorNameRe = regexp.MustCompile(`(?i)\btest`)
+
+// IsTestPayorName reports whether a payor/plan name belongs to a test or QA payor
+// whose transactions must never create MPI patients. Test payors (QS/1, PowerLine,
+// Express Scripts Test, state-Medicaid test BINs, etc.) carry hardcoded sentinel DOBs
+// and synthetic demographics; left ungated they mint junk patients in the production
+// index. This is a rule, not a frozen BIN list, so newly-added test payors are caught
+// automatically. The caller resolves a BIN/PCN/group to its plan name before calling.
+func IsTestPayorName(planName string) bool {
+	return testPayorNameRe.MatchString(planName)
+}
