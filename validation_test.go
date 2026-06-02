@@ -73,6 +73,41 @@ func TestValidateGender(t *testing.T) {
 	}
 }
 
+func TestIsTestPayorName(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		// Real test/QA payor names from RULEDATA_PLAN — must be flagged.
+		{"QS/1 Test Claims", true},
+		{"PowerLine Test", true},
+		{"PowerLine AWS Test Payor", true},
+		{"Express Scripts Test", true},
+		{"Prime Therapeutics Test", true},
+		{"MassHealth - DR Testing", true},
+		{"MedImpact Testing BIN", true},
+		{"TEST PLAN", true},
+		{"West Virginia Test BIN", true},
+		{"RedSail Commercial E1 (Test)", true},
+		{"Testing", true},
+		{"powerline test claims", true},
+		// Real production payor names that contain "test" as a substring — must NOT be flagged.
+		{"Greatest Health Plan", false},
+		{"Latest Choice Rx", false},
+		{"Contest Pharmacy Benefits", false},
+		{"Caremark", false},
+		{"OptumRx", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsTestPayorName(tt.name); got != tt.want {
+				t.Errorf("IsTestPayorName(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsValidUSPhoneNumber(t *testing.T) {
 	tests := []struct {
 		phone string
