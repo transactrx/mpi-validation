@@ -40,6 +40,29 @@ var petPrefixRegex = regexp.MustCompile(`(?i)^(k9|dog)\s`)
 //   - "can$" -- truncated canine, but matches "Duncan"
 var ambiguousPetRegex = regexp.MustCompile(`(?i)(fe|cat|can)$`)
 
+// petLastNames are species tokens that are garbage only when they are the ENTIRE
+// (cleaned) lastName. Veterinary systems sometimes drop the species into the surname
+// field ("Rex"/"Dog", "Mittens"/"Cat"). Matched by EXACT equality, never as a suffix:
+// no human surname is exactly "dog"/"cat"/"k9", whereas the species *suffix* regex would
+// falsely flag real surnames (Apfel, Whitehorse, Roanhorse) -- which is why the firstName
+// pet regex is deliberately NOT applied to lastName. Only full, unambiguous animal nouns
+// are listed (no truncations like "fel"/"cani", which could be real short surnames).
+var petLastNames = map[string]bool{
+	"dog": true, "cat": true, "k9": true, "canine": true, "feline": true,
+	"puppy": true, "kitten": true, "bunny": true, "ferret": true, "hamster": true,
+	"parrot": true, "gecko": true, "iguana": true,
+}
+
+// facilityLastNames are institutional/non-person words that identify a facility account
+// rather than a patient when they are the ENTIRE (cleaned) lastName ("PCH"/"Pharmacy",
+// "Symbii Utah"/"Hospice"). Matched by EXACT equality. Deliberately EXCLUDES words that
+// are also real surnames -- home (real surname Home), center, health, stock (Stock), and
+// card (Card) -- those need a first-name co-signal and are left to the cleanup classifier.
+var facilityLastNames = map[string]bool{
+	"clinic": true, "pharmacy": true, "hospice": true, "facility": true,
+	"snf": true, "ltc": true, "rx": true, "healthcare": true, "infusion": true,
+}
+
 // maxNameLen is the cleaned-name length above which a value is treated as a claim
 // blob (a whole NCPDP segment dumped into the name field). Real firstName cleaned
 // length is p99.9=12 in a 250k sample; only 4/250k exceeded 25. 40 is a safe ceiling.
@@ -81,11 +104,12 @@ func hasNCPDPControlChars(s string) bool {
 // StripNonAlphanumeric removes spaces, and the prefix pattern "^(k9|dog)\s" needs the space.
 //
 // Return values:
-//   - "pet" -- matched primary pet name regex (unambiguous animal species)
+//   - "pet" -- unambiguous animal species (firstName suffix/prefix, or whole lastName)
 //   - "claim_blob" -- a raw NCPDP segment leaked into a name field (length / control chars)
 //   - "junk_placeholder" -- exact placeholder token (test, unknown, newborn, ...)
 //   - "system_statsafe" -- pharmaceutical data artifact
 //   - "institutional_housestock" -- house stock institutional account
+//   - "institutional_facility" -- facility account (clinic/pharmacy/hospice/... as whole lastName)
 //   - "ambiguous_pet" -- matched ambiguous suffix with corroborating signals
 //   - "" -- legitimate patient, no match
 func ClassifyGarbage(firstName, lastName, dob, street, zip, phone string) string {
@@ -96,6 +120,12 @@ func ClassifyGarbage(firstName, lastName, dob, street, zip, phone string) string
 	firstNameClean := StripNonAlphanumeric(firstName)
 	lastNameClean := StripNonAlphanumeric(lastName)
 	if petSuffixRegex.MatchString(firstNameClean) || petPrefixRegex.MatchString(firstName) {
+		return "pet"
+	}
+	// Species token as the WHOLE lastName (exact match only -- see petLastNames). This is
+	// the safe complement to the rule below: exact equality cannot hit a real surname,
+	// whereas suffix matching against lastName would.
+	if petLastNames[strings.ToLower(lastNameClean)] {
 		return "pet"
 	}
 	// NOTE: deliberately NOT matching the species suffix against lastName. Validated
@@ -144,6 +174,10 @@ func ClassifyGarbage(firstName, lastName, dob, street, zip, phone string) string
 	// 6. Institutional accounts
 	if lower == "house" && lowerLast == "stock" {
 		return "institutional_housestock"
+	}
+	// Facility account -- an unambiguous non-person word as the whole lastName.
+	if facilityLastNames[strings.ToLower(lastNameClean)] {
+		return "institutional_facility"
 	}
 
 	// 4. Ambiguous suffixes -- only with strong signals (Jan 1st DOB, no address, no phone).

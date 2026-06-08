@@ -206,6 +206,37 @@ func TestClassifyGarbage_CarpetEndingInPet(t *testing.T) {
 	}
 }
 
+func TestClassifyGarbage_PetLastName(t *testing.T) {
+	// Species token as the WHOLE lastName -> pet (exact match, not suffix).
+	for _, ln := range []string{"dog", "Cat", "K9", "canine", "FELINE", "kitten", "puppy", "bunny", "ferret", "hamster", "parrot", "gecko", "iguana"} {
+		if got := ClassifyGarbage("rex", ln, "20210101", "", "", ""); got != "pet" {
+			t.Errorf("ClassifyGarbage(rex, %q) = %q, want pet", ln, got)
+		}
+	}
+	// Real surnames that merely CONTAIN or end in a species token must NOT be flagged --
+	// exact match protects them where suffix matching would not.
+	for _, ln := range []string{"hodge", "catalano", "dogget", "doggett", "catt", "k99", "whitehorse", "roanhorse", "apfel"} {
+		if got := ClassifyGarbage("mary", ln, "19400101", "", "", ""); got != "" {
+			t.Errorf("ClassifyGarbage(mary, %q) = %q, want empty (real surname, not exact species)", ln, got)
+		}
+	}
+}
+
+func TestClassifyGarbage_InstitutionalFacility(t *testing.T) {
+	// Unambiguous facility word as the whole lastName -> institutional_facility.
+	for _, ln := range []string{"hospice", "Pharmacy", "CLINIC", "facility", "snf", "ltc", "rx", "healthcare", "infusion"} {
+		if got := ClassifyGarbage("symbii", ln, "19510101", "", "", ""); got != "institutional_facility" {
+			t.Errorf("ClassifyGarbage(symbii, %q) = %q, want institutional_facility", ln, got)
+		}
+	}
+	// Surname-risky words are deliberately NOT gated (real surnames Home/Center/Stock/Card).
+	for _, ln := range []string{"home", "center", "health", "stock", "card"} {
+		if got := ClassifyGarbage("john", ln, "19500101", "123 Main St", "10001", "2125551234"); got != "" {
+			t.Errorf("ClassifyGarbage(john, %q) = %q, want empty (ambiguous; needs first-name co-signal)", ln, got)
+		}
+	}
+}
+
 func TestClassifyGarbage_SystemArtifacts(t *testing.T) {
 	tests := []struct {
 		name      string
