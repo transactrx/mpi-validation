@@ -20,25 +20,53 @@ import (
 // punctuation bypass the $-anchor and slip past the gate while the MPI happily stored
 // the clean pet name -- the leak that put pets into the index.
 //
-// Excluded from this regex (handled as ambiguous with extra guards):
-//   - "fe$" -- matches "Josephe" etc.
-//   - "cat$" -- matches "Catherine" truncated
-//   - "can$" -- matches "Duncan"
+// Excluded from this regex (handled by the corroborated ambiguous tier below):
+//   - "fel$" -- matches real names RAFEL, MARIFEL (Filipino), SURAFEL (Ethiopian),
+//     CHRISTOFFEL, STOFFEL (Dutch/Afrikaans)
+//   - "pet$" -- matches real Armenian names KARAPET, HAYRAPET, YEGISAPET
+//   - "pup$", "pig$", "goat$", "horse$", "guinea$" -- demoted with the above after prod
+//     measurement (2026-06, paid claims) showed these suffixes flag ~850-1500 real
+//     claims per 6 weeks
 var petSuffixRegex = regexp.MustCompile(
-	`(?i)(canine|canin|cani|feline|feli|fel|dog|k9|equine|equin|pup|pet|kitten|` +
-		`bunny|rabbit|ferret|hamster|guinea|turtle|parrot|gecko|iguana|horse|goat|pig)$`)
+	`(?i)(canine|canin|cani|feline|feli|dog|k9|equine|equin|puppy|kitten|` +
+		`bunny|rabbit|ferret|hamster|turtle|parrot|gecko|iguana)$`)
 
 // petPrefixRegex matches a leading species token followed by a space (e.g. "k9 buddy",
 // "dog rex"). Matched against the raw (TrimSpace'd) firstName because StripNonAlphanumeric
 // removes the space this pattern depends on.
 var petPrefixRegex = regexp.MustCompile(`(?i)^(k9|dog)\s`)
 
-// ambiguousPetRegex matches suffixes that are only safe when combined with
-// additional signals (DOB = Jan 1st AND no address AND no phone).
-//   - "fe$" -- truncated feline, but matches "Josephe"
-//   - "cat$" -- feline suffix, but matches "Catherine" truncated
-//   - "can$" -- truncated canine, but matches "Duncan"
-var ambiguousPetRegex = regexp.MustCompile(`(?i)(fe|cat|can)$`)
+// ambiguousPetSuffixRegex matches species suffixes that are also productive endings of
+// real human names (see petSuffixRegex comment for the measured prod examples). These
+// reject only when BOTH guards hold: no contact data (street/zip/phone) AND the name is
+// not in humanPetLikeNames. Demoted from the unconditional tier 2026-06 after prod
+// measurement showed they were dropping real paid claims.
+//
+// Known residual FP risk: a real patient with one of these name endings who is NOT in
+// the allowlist and has no contact data (e.g. an LTC resident) is still rejected.
+// Extend humanPetLikeNames as prod measurement surfaces more real names.
+var ambiguousPetSuffixRegex = regexp.MustCompile(`(?i)(fel|pet|pup|pig|goat|horse|guinea)$`)
+
+// humanPetLikeNames are real human first names (cleaned, lowercased) that end in an
+// ambiguous species suffix. Every entry was measured in production PAID claims
+// (2026-06, 6-week window) -- these are real patients, never garbage.
+//   - Armenian: Karapet, Hayrapet, Yegisapet
+//   - Filipino: Rafel, Marifel
+//   - Ethiopian: Surafel
+//   - Dutch/Afrikaans: Christoffel, Stoffel
+var humanPetLikeNames = map[string]bool{
+	"karapet": true, "hayrapet": true, "yegisapet": true,
+	"rafel": true, "marifel": true, "surafel": true,
+	"christoffel": true, "stoffel": true,
+}
+
+// NOTE: the former (fe|cat|can)$ tier is GONE. Its corroborator was "DOB = Jan 1 AND no
+// contact data", but Jan-1 is the defaulted-DOB signature of REAL long-term-care
+// patients (who also legitimately lack street/zip/phone -- they live in a facility), so
+// the corroborator selected exactly the population it was meant to protect. Without it,
+// fe/cat/can are hopeless false-positive generators (Josephe, Aoife, Duncan, and "Fe"
+// itself is a real Filipino name). Pets named *fe/*cat/*can are left to the cleanup
+// classifier, which can use richer corroboration than an ingest gate.
 
 // petLastNames are species tokens that are garbage only when they are the ENTIRE
 // (cleaned) lastName. Veterinary systems sometimes drop the species into the surname
@@ -180,21 +208,15 @@ func ClassifyGarbage(firstName, lastName, dob, street, zip, phone string) string
 		return "institutional_facility"
 	}
 
-	// 4. Ambiguous suffixes -- only with strong signals (Jan 1st DOB, no address, no phone).
-	// Matched against the normalized form for the same reason as the primary suffix.
-	if ambiguousPetRegex.MatchString(firstNameClean) {
-		if isJanFirst(dob) && street == "" && zip == "" && phone == "" {
-			return "ambiguous_pet"
-		}
+	// 7. Ambiguous species suffixes -- corroborated tier. Reject only when no contact
+	// data corroborates AND the name is not a known real human name. Matched against
+	// the normalized form for the same reason as the primary suffix. Deliberately does
+	// NOT use DOB as a signal: Jan-1 DOBs are the defaulted-DOB population of real LTC
+	// patients (see the NOTE on the regex above).
+	if ambiguousPetSuffixRegex.MatchString(firstNameClean) &&
+		!humanPetLikeNames[cleanedLowerFirst] && !hasContact {
+		return "ambiguous_pet"
 	}
 
 	return ""
-}
-
-// isJanFirst returns true if the DOB string is in format YYYYMMDD and the month/day is 0101.
-func isJanFirst(dob string) bool {
-	if len(dob) < 8 {
-		return false
-	}
-	return dob[4:8] == "0101"
 }

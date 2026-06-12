@@ -16,26 +16,20 @@ func TestClassifyGarbage_PetNames(t *testing.T) {
 		{"cani suffix", "MaxCani", "", "pet"},
 		{"feline suffix", "SimbaFeline", "", "pet"},
 		{"feli suffix", "WhiskersFeli", "", "pet"},
-		{"fel suffix", "MittsFel", "", "pet"},
 		{"dog suffix", "RexDog", "", "pet"},
 		{"k9 suffix", "BuddyK9", "", "pet"},
 		{"equine suffix", "BirdyEquine", "", "pet"},
 		{"equin suffix", "DaisyEquin", "", "pet"},
-		{"pup suffix", "MaxPup", "", "pet"},
-		{"pet suffix", "BellasPet", "", "pet"},
+		{"puppy suffix", "FidoPuppy", "", "pet"},
 		{"kitten suffix", "FuzzyKitten", "", "pet"},
 		{"bunny suffix", "FluffyBunny", "", "pet"},
 		{"rabbit suffix", "CottonRabbit", "", "pet"},
 		{"ferret suffix", "SlinkyFerret", "", "pet"},
 		{"hamster suffix", "PipsqueakHamster", "", "pet"},
-		{"guinea suffix", "PopcornGuinea", "", "pet"},
 		{"turtle suffix", "SlowpokesTurtle", "", "pet"},
 		{"parrot suffix", "CrackerParrot", "", "pet"},
 		{"gecko suffix", "SpottyGecko", "", "pet"},
 		{"iguana suffix", "SpikeyIguana", "", "pet"},
-		{"horse suffix", "ThunderHorse", "", "pet"},
-		{"goat suffix", "BillyGoat", "", "pet"},
-		{"pig suffix", "WilburPig", "", "pet"},
 
 		// Prefix patterns
 		{"k9 prefix", "K9 Buddy", "", "pet"},
@@ -197,12 +191,16 @@ func TestClassifyGarbage_MustNotMatch(t *testing.T) {
 }
 
 func TestClassifyGarbage_CarpetEndingInPet(t *testing.T) {
-	// "Carpet" ends in "pet" so it WILL match the primary regex.
-	// This is acceptable — "Carpet" is not a real first name. The regex was validated
-	// against 47M real patient records during the Phase 5c cleanup.
-	got := ClassifyGarbage("Carpet", "", "19900115", "123 Main St", "10001", "2125551234")
-	if got != "pet" {
-		t.Errorf("ClassifyGarbage(\"Carpet\") = %q, want \"pet\" (ends in pet suffix)", got)
+	// "pet$" is now an AMBIGUOUS suffix (real Armenian names end in -pet), so "Carpet"
+	// only rejects when no contact data corroborates. With contact data it passes —
+	// the FP-averse tradeoff of demoting the suffix.
+	got := ClassifyGarbage("Carpet", "", "19900115", "", "", "")
+	if got != "ambiguous_pet" {
+		t.Errorf("ClassifyGarbage(\"Carpet\") no contact = %q, want \"ambiguous_pet\"", got)
+	}
+	got = ClassifyGarbage("Carpet", "", "19900115", "123 Main St", "10001", "2125551234")
+	if got != "" {
+		t.Errorf("ClassifyGarbage(\"Carpet\") w/ contact = %q, want empty (contact data corroborates)", got)
 	}
 }
 
@@ -260,129 +258,71 @@ func TestClassifyGarbage_SystemArtifacts(t *testing.T) {
 	}
 }
 
-func TestClassifyGarbage_AmbiguousPet(t *testing.T) {
-	// Ambiguous suffixes (fe, cat, can) only match with Jan 1st DOB + no address + no phone
+func TestClassifyGarbage_AmbiguousPetSuffixes(t *testing.T) {
+	// Demoted suffixes (fel, pet, pup, pig, goat, horse, guinea): reject only when no
+	// contact data corroborates AND the name is not a known real human name.
 	tests := []struct {
 		name      string
 		firstName string
-		lastName  string
-		dob       string
 		street    string
 		zip       string
 		phone     string
 		want      string
 	}{
-		{
-			name:      "ambiguous cat suffix with signals",
-			firstName: "SimbaCat",
-			dob:       "20200101",
-			want:      "ambiguous_pet",
-		},
-		{
-			name:      "ambiguous fe suffix with signals",
-			firstName: "MittsFe",
-			dob:       "20150101",
-			want:      "ambiguous_pet",
-		},
-		{
-			name:      "ambiguous can suffix with signals",
-			firstName: "BuddyCan",
-			dob:       "20180101",
-			want:      "ambiguous_pet",
-		},
-		{
-			name:      "ambiguous but has address",
-			firstName: "SimbaCat",
-			dob:       "20200101",
-			street:    "123 Main St",
-			want:      "",
-		},
-		{
-			name:      "ambiguous but has zip",
-			firstName: "SimbaCat",
-			dob:       "20200101",
-			zip:       "10001",
-			want:      "",
-		},
-		{
-			name:      "ambiguous but has phone",
-			firstName: "SimbaCat",
-			dob:       "20200101",
-			phone:     "2125551234",
-			want:      "",
-		},
-		{
-			name:      "ambiguous but non-Jan1 DOB",
-			firstName: "SimbaCat",
-			dob:       "20200215",
-			want:      "",
-		},
-		{
-			name:      "Duncan with address (not ambiguous)",
-			firstName: "Duncan",
-			dob:       "19850101",
-			street:    "456 Oak Ave",
-			zip:       "90210",
-			want:      "",
-		},
-		{
-			name:      "Josephe with phone (not ambiguous)",
-			firstName: "Josephe",
-			dob:       "19950101",
-			phone:     "3105551234",
-			want:      "",
-		},
+		// No contact data, not allowlisted -> ambiguous_pet
+		{"fel suffix no contact", "MittsFel", "", "", "", "ambiguous_pet"},
+		{"pet suffix no contact", "BellasPet", "", "", "", "ambiguous_pet"},
+		{"pup suffix no contact", "MaxPup", "", "", "", "ambiguous_pet"},
+		{"pig suffix no contact", "WilburPig", "", "", "", "ambiguous_pet"},
+		{"goat suffix no contact", "BillyGoat", "", "", "", "ambiguous_pet"},
+		{"horse suffix no contact", "ThunderHorse", "", "", "", "ambiguous_pet"},
+		{"guinea suffix no contact", "PopcornGuinea", "", "", "", "ambiguous_pet"},
+
+		// Any contact data -> pass
+		{"fel suffix with address", "MittsFel", "123 Main St", "", "", ""},
+		{"pet suffix with zip", "BellasPet", "", "10001", "", ""},
+		{"pup suffix with phone", "MaxPup", "", "", "2125551234", ""},
+
+		// Former (fe|cat|can) tier is gone: its only corroborator (Jan-1 DOB + no
+		// contact) is the signature of REAL defaulted-DOB LTC patients.
+		{"cat suffix no contact", "SimbaCat", "", "", "", ""},
+		{"fe suffix no contact", "MittsFe", "", "", "", ""},
+		{"can suffix no contact", "BuddyCan", "", "", "", ""},
+		{"Duncan no contact", "Duncan", "", "", "", ""},
+		{"Aoife no contact", "Aoife", "", "", "", ""},
+		{"Josephe no contact", "Josephe", "", "", "", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ClassifyGarbage(tt.firstName, tt.lastName, tt.dob, tt.street, tt.zip, tt.phone)
+			// Jan-1 DOB on purpose: it must NOT influence the outcome.
+			got := ClassifyGarbage(tt.firstName, "", "20200101", tt.street, tt.zip, tt.phone)
 			if got != tt.want {
-				t.Errorf("ClassifyGarbage(%q, %q, dob=%q, street=%q, zip=%q, phone=%q) = %q, want %q",
-					tt.firstName, tt.lastName, tt.dob, tt.street, tt.zip, tt.phone, got, tt.want)
+				t.Errorf("ClassifyGarbage(%q, street=%q, zip=%q, phone=%q) = %q, want %q",
+					tt.firstName, tt.street, tt.zip, tt.phone, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestClassifyGarbage_AmbiguousRealNames_WithSignals(t *testing.T) {
-	// Real names ending in ambiguous suffixes WITH all signals present
-	// These WILL match as ambiguous_pet — this is by design.
-	// In production, the combination of Jan 1st DOB + no address + no phone
-	// on a name ending in "cat"/"can"/"fe" is overwhelmingly pet data.
-	tests := []struct {
-		name      string
-		firstName string
-	}{
-		{"Duncan no data Jan1", "Duncan"},
-		{"Aoife no data Jan1", "Aoife"}, // Irish name ending in "fe"
+func TestClassifyGarbage_RealNamesWithPetLikeSuffixes(t *testing.T) {
+	// Real human first names measured in production PAID claims (2026-06). These end in
+	// demoted species suffixes and were being dropped (~850-1500 claims per 6 weeks).
+	// They must pass even with NO contact data (LTC residents) and Jan-1 DOB.
+	names := []string{
+		"KARAPET", "HAYRAPET", "YEGISAPET", // Armenian
+		"RAFEL", "MARIFEL", // Filipino
+		"SURAFEL", // Ethiopian
+		"CHRISTOFFEL", "STOFFEL", // Dutch/Afrikaans
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ClassifyGarbage(tt.firstName, "", "20000101", "", "", "")
-			if got != "ambiguous_pet" {
-				t.Errorf("ClassifyGarbage(%q) with Jan1+no data = %q, want \"ambiguous_pet\"", tt.firstName, got)
+	for _, fn := range names {
+		t.Run(fn, func(t *testing.T) {
+			if got := ClassifyGarbage(fn, "GRIGORYAN", "19400101", "", "", ""); got != "" {
+				t.Errorf("ClassifyGarbage(%q) no contact + Jan-1 DOB = %q, want empty (allowlisted real name)", fn, got)
+			}
+			if got := ClassifyGarbage(fn, "GRIGORYAN", "19471112", "123 Main St", "10001", "2125551234"); got != "" {
+				t.Errorf("ClassifyGarbage(%q) w/ contact = %q, want empty (real name)", fn, got)
 			}
 		})
-	}
-}
-
-func TestIsJanFirst(t *testing.T) {
-	tests := []struct {
-		dob  string
-		want bool
-	}{
-		{"20200101", true},
-		{"19900101", true},
-		{"20200215", false},
-		{"20201231", false},
-		{"short", false},
-		{"", false},
-	}
-	for _, tt := range tests {
-		got := isJanFirst(tt.dob)
-		if got != tt.want {
-			t.Errorf("isJanFirst(%q) = %v, want %v", tt.dob, got, tt.want)
-		}
 	}
 }
 
