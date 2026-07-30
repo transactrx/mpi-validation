@@ -83,11 +83,11 @@ func TestClassifyGarbage_DigitRunNotGarbage(t *testing.T) {
 	// ("PADILLA (16669)" -> "padilla16669"), and LTC residents legitimately have no
 	// street/zip/phone. So digit-run names must pass WITH OR WITHOUT contact data.
 	noContact := []struct{ fn, ln string }{
-		{"rita", "padilla16669"},   // real Grane PBM LTC patient, member ID in surname
+		{"rita", "padilla16669"}, // real Grane PBM LTC patient, member ID in surname
 		{"trinidad", "martinez16991"},
-		{"carolyn1943", "scheer"},  // real DOB-year suffix
+		{"carolyn1943", "scheer"}, // real DOB-year suffix
 		{"kathryn519", "blum"},
-		{"mary", "kunze718832"},    // formerly flagged as "synthetic" -- not gated anymore
+		{"mary", "kunze718832"}, // formerly flagged as "synthetic" -- not gated anymore
 	}
 	for _, c := range noContact {
 		if got := ClassifyGarbage(c.fn, c.ln, "19430615", "", "", ""); got != "" {
@@ -138,6 +138,100 @@ func TestClassifyGarbage_JunkPlaceholder(t *testing.T) {
 	}
 	if got := ClassifyGarbage("na", "yi", "19380501", "123 Main St", "10001", "2125551234"); got != "" {
 		t.Errorf("ClassifyGarbage(na) w/ contact = %q, want empty (real name)", got)
+	}
+}
+
+func TestClassifyGarbage_ExactJunkPairs(t *testing.T) {
+	tests := []struct {
+		firstName string
+		lastName  string
+	}{
+		{"discount", "card"},
+		{"FIRST", "LAST"},
+		{"dummy", "dummy"},
+		{"Mickey", "Mouse"},
+		{" discount ", " card "},
+	}
+	for _, tt := range tests {
+		if got := ClassifyGarbage(tt.firstName, tt.lastName, "19900101", "123 Main St", "10001", "2125551234"); got != "junk_pair" {
+			t.Errorf("ClassifyGarbage(%q, %q) = %q, want junk_pair", tt.firstName, tt.lastName, got)
+		}
+	}
+
+	// Ambiguous individual components remain valid outside the exact pair.
+	for _, tt := range []struct {
+		firstName string
+		lastName  string
+	}{
+		{"john", "card"},
+		{"mickey", "smith"},
+		{"mary", "mouse"},
+		{"first", "johnson"},
+	} {
+		if got := ClassifyGarbage(tt.firstName, tt.lastName, "19900101", "123 Main St", "10001", "2125551234"); got != "" {
+			t.Errorf("ClassifyGarbage(%q, %q) = %q, want empty (not an exact junk pair)", tt.firstName, tt.lastName, got)
+		}
+	}
+}
+
+func TestClassifyGarbage_AuditedPrefixesAndTypedPairs(t *testing.T) {
+	tests := []struct {
+		name      string
+		firstName string
+		lastName  string
+		want      string
+	}{
+		{"statsafe numbered", "statsafe3", "qcr", "system_statsafe"},
+		{"statsafe punctuation", "statsafe-12", "qcr", "system_statsafe"},
+		{"ekit firstName", "ekitst1", "facility", "system_ekit"},
+		{"ekit lastName", "cast", "ekitbilling", "system_ekit"},
+		{"stock account suffix", "t", "meokstockaccoun", "institutional_stock_account"},
+		{"stock account words", "t", "Stock Account", "institutional_stock_account"},
+		{"numeric donor", "36733", "donor", "junk_numeric_donor"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ClassifyGarbage(tt.firstName, tt.lastName, "19900101", "123 Main St", "10001", "2125551234"); got != tt.want {
+				t.Errorf("ClassifyGarbage(%q, %q) = %q, want %q", tt.firstName, tt.lastName, got, tt.want)
+			}
+		})
+	}
+
+	// Keep the rules narrow: Stock is a real surname and digits in names are common in
+	// LTC feeds. Neither is garbage without its exact co-signal.
+	for _, tt := range []struct {
+		firstName string
+		lastName  string
+	}{
+		{"john", "stock"},
+		{"36733", "smith"},
+		{"mary", "donor"},
+		{"latest", "choice"},
+		{"ekiti", "smith"},
+	} {
+		if got := ClassifyGarbage(tt.firstName, tt.lastName, "19900101", "123 Main St", "10001", "2125551234"); got != "" {
+			t.Errorf("ClassifyGarbage(%q, %q) = %q, want empty (co-signal absent)", tt.firstName, tt.lastName, got)
+		}
+	}
+}
+
+func TestClassifyGarbage_CorroboratedPlaceholderFirstNames(t *testing.T) {
+	for _, firstName := range []string{"office", "MRS"} {
+		if got := ClassifyGarbage(firstName, "smith", "19900101", "", "", ""); got != "junk_placeholder" {
+			t.Errorf("ClassifyGarbage(%q) no contact = %q, want junk_placeholder", firstName, got)
+		}
+		if got := ClassifyGarbage(firstName, "smith", "19900101", "123 Main St", "", ""); got != "" {
+			t.Errorf("ClassifyGarbage(%q) with contact = %q, want empty", firstName, got)
+		}
+	}
+
+	// Family remains disabled until the production FP measurement requested by issue #7
+	// is available. Office is also a legitimate surname, so only firstName is examined.
+	if got := ClassifyGarbage("family", "smith", "19900101", "", "", ""); got != "" {
+		t.Errorf("ClassifyGarbage(family) = %q, want empty pending FP measurement", got)
+	}
+	if got := ClassifyGarbage("mary", "office", "19900101", "", "", ""); got != "" {
+		t.Errorf("ClassifyGarbage(mary, office) = %q, want empty (real surname)", got)
 	}
 }
 
@@ -311,7 +405,7 @@ func TestClassifyGarbage_RealNamesWithPetLikeSuffixes(t *testing.T) {
 	names := []string{
 		"KARAPET", "HAYRAPET", "YEGISAPET", // Armenian
 		"RAFEL", "MARIFEL", // Filipino
-		"SURAFEL", // Ethiopian
+		"SURAFEL",                // Ethiopian
 		"CHRISTOFFEL", "STOFFEL", // Dutch/Afrikaans
 	}
 	for _, fn := range names {

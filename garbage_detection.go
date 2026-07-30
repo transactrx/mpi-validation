@@ -108,9 +108,40 @@ var junkFirstNames = map[string]bool{
 // ambiguousJunkFirstNames are tokens that LOOK like placeholders but can also be
 // real given names, so they need a corroborating signal before rejection.
 //   - "na" -- the "N/A" placeholder, but also a real Korean/Vietnamese given name.
+//
 // These reject only when no contact data (phone/address) corroborates the suspicion.
 var ambiguousJunkFirstNames = map[string]bool{
 	"na": true,
+}
+
+// junkNamePairs are exact, MPI-normalized first+last combinations observed as
+// synthetic identities in production. Pair matching protects legitimate surnames such
+// as Card and Mouse: neither component is garbage on its own.
+var junkNamePairs = map[[2]string]bool{
+	{"discount", "card"}: true,
+	{"first", "last"}:    true,
+	{"dummy", "dummy"}:   true,
+	{"mickey", "mouse"}:  true,
+}
+
+// corroboratedJunkFirstNames are placeholder-like tokens that are safe to reject only
+// when the record has no patient-level contact data. "family" deliberately remains
+// excluded pending the production false-positive measurement required by issue #7.
+// Do not use Jan-1 DOB as corroboration: production measurement proved that pattern is
+// common among real LTC patients.
+var corroboratedJunkFirstNames = map[string]bool{
+	"office": true,
+	"mrs":    true,
+}
+
+var numericNameRe = regexp.MustCompile(`^[0-9]+$`)
+
+func hasEKitSystemToken(cleanedLowerName string) bool {
+	if cleanedLowerName == "ekit" {
+		return true
+	}
+	return strings.HasPrefix(cleanedLowerName, "ekitst") ||
+		strings.HasPrefix(cleanedLowerName, "ekitbilling")
 }
 
 // hasNCPDPControlChars reports whether s contains an NCPDP separator control
@@ -135,8 +166,12 @@ func hasNCPDPControlChars(s string) bool {
 //   - "pet" -- unambiguous animal species (firstName suffix/prefix, or whole lastName)
 //   - "claim_blob" -- a raw NCPDP segment leaked into a name field (length / control chars)
 //   - "junk_placeholder" -- exact placeholder token (test, unknown, newborn, ...)
+//   - "junk_pair" -- exact synthetic first+last pair (discount/card, first/last, ...)
+//   - "junk_numeric_donor" -- numeric firstName paired with donor as the whole lastName
 //   - "system_statsafe" -- pharmaceutical data artifact
+//   - "system_ekit" -- eKit system token/prefix in either name field
 //   - "institutional_housestock" -- house stock institutional account
+//   - "institutional_stock_account" -- stock-account token in the lastName
 //   - "institutional_facility" -- facility account (clinic/pharmacy/hospice/... as whole lastName)
 //   - "ambiguous_pet" -- matched ambiguous suffix with corroborating signals
 //   - "" -- legitimate patient, no match
@@ -181,11 +216,19 @@ func ClassifyGarbage(firstName, lastName, dob, street, zip, phone string) string
 	hasContact := strings.TrimSpace(street) != "" || strings.TrimSpace(zip) != "" ||
 		strings.TrimSpace(phone) != ""
 
-	lower := strings.ToLower(strings.TrimSpace(firstName))
-	lowerLast := strings.ToLower(strings.TrimSpace(lastName))
-
-	// 4. Junk placeholder firstNames (exact match on the cleaned, lowercased value).
 	cleanedLowerFirst := strings.ToLower(firstNameClean)
+	cleanedLowerLast := strings.ToLower(lastNameClean)
+
+	// 4. Exact production-observed placeholder identities. These rules use both fields
+	// (or a narrowly typed pair) so ambiguous individual names/surnames remain valid.
+	if junkNamePairs[[2]string{cleanedLowerFirst, cleanedLowerLast}] {
+		return "junk_pair"
+	}
+	if numericNameRe.MatchString(cleanedLowerFirst) && cleanedLowerLast == "donor" {
+		return "junk_numeric_donor"
+	}
+
+	// 5. Junk placeholder firstNames (exact match on the cleaned, lowercased value).
 	if junkFirstNames[cleanedLowerFirst] {
 		return "junk_placeholder"
 	}
@@ -193,22 +236,33 @@ func ClassifyGarbage(firstName, lastName, dob, street, zip, phone string) string
 	if ambiguousJunkFirstNames[cleanedLowerFirst] && !hasContact {
 		return "junk_placeholder"
 	}
+	if corroboratedJunkFirstNames[cleanedLowerFirst] && !hasContact {
+		return "junk_placeholder"
+	}
 
-	// 5. System artifacts
-	if lower == "statsafe" {
+	// 6. System artifacts. Match prefixes against the MPI-normalized form so numbered
+	// variants such as statsafe3 and ekitst1 cannot bypass the gate with punctuation.
+	if strings.HasPrefix(cleanedLowerFirst, "statsafe") {
 		return "system_statsafe"
 	}
+	if hasEKitSystemToken(cleanedLowerFirst) ||
+		hasEKitSystemToken(cleanedLowerLast) {
+		return "system_ekit"
+	}
 
-	// 6. Institutional accounts
-	if lower == "house" && lowerLast == "stock" {
+	// 7. Institutional accounts
+	if cleanedLowerFirst == "house" && cleanedLowerLast == "stock" {
 		return "institutional_housestock"
 	}
+	if strings.Contains(cleanedLowerLast, "stockaccoun") {
+		return "institutional_stock_account"
+	}
 	// Facility account -- an unambiguous non-person word as the whole lastName.
-	if facilityLastNames[strings.ToLower(lastNameClean)] {
+	if facilityLastNames[cleanedLowerLast] {
 		return "institutional_facility"
 	}
 
-	// 7. Ambiguous species suffixes -- corroborated tier. Reject only when no contact
+	// 8. Ambiguous species suffixes -- corroborated tier. Reject only when no contact
 	// data corroborates AND the name is not a known real human name. Matched against
 	// the normalized form for the same reason as the primary suffix. Deliberately does
 	// NOT use DOB as a signal: Jan-1 DOBs are the defaulted-DOB population of real LTC

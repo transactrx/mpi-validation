@@ -132,14 +132,38 @@ func TestIsValidUSPhoneNumber(t *testing.T) {
 	}
 }
 
+func TestIsValidUSZipCode(t *testing.T) {
+	tests := []struct {
+		zip  string
+		want bool
+	}{
+		{"10001", true},
+		{"33601", true},
+		{"00000", false},
+		{"99999", false},
+		{"11111", false},
+		{"55555", false},
+		{"1234", false},
+		{"123456", false},
+		{"12345-6789", false},
+		{"ABCDE", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := IsValidUSZipCode(tt.zip); got != tt.want {
+			t.Errorf("IsValidUSZipCode(%q) = %v, want %v", tt.zip, got, tt.want)
+		}
+	}
+}
+
 func TestIsValidNPI(t *testing.T) {
 	tests := []struct {
 		npi  string
 		want bool
 	}{
-		{"1234567893", true},  // valid 10-digit NPI
-		{"1234567890", false}, // invalid Luhn
-		{"123456789", false},  // too short
+		{"1234567893", true},   // valid 10-digit NPI
+		{"1234567890", false},  // invalid Luhn
+		{"123456789", false},   // too short
 		{"12345678901", false}, // wrong length
 		{"", false},
 		{"abcdefghij", false},
@@ -204,6 +228,26 @@ func TestHasSufficientDataForCreation(t *testing.T) {
 		{
 			name:    "has zip only",
 			patient: InboundPatientIdRequest{Zip: "10001"},
+			want:    true,
+		},
+		{
+			name:    "placeholder zero zip only",
+			patient: InboundPatientIdRequest{Zip: "00000"},
+			want:    false,
+		},
+		{
+			name:    "placeholder repeated-digit zip only",
+			patient: InboundPatientIdRequest{Zip: "55555"},
+			want:    false,
+		},
+		{
+			name:    "malformed zip only",
+			patient: InboundPatientIdRequest{Zip: "1234"},
+			want:    false,
+		},
+		{
+			name:    "street remains sufficient with invalid zip",
+			patient: InboundPatientIdRequest{Street: "123 Main St", Zip: "00000"},
 			want:    true,
 		},
 		{
@@ -319,6 +363,19 @@ func TestValidateMPIRequest(t *testing.T) {
 		}
 		if err := ValidateMPIRequest(&p); err == nil {
 			t.Error("ValidateMPIRequest() expected error for insufficient data")
+		}
+	})
+
+	t.Run("placeholder zip is insufficient", func(t *testing.T) {
+		p := InboundPatientIdRequest{
+			FirstName: "John",
+			LastName:  "Doe",
+			DOB:       "19900115",
+			Gender:    "1",
+			Zip:       "00000",
+		}
+		if err := ValidateMPIRequest(&p); err == nil {
+			t.Error("ValidateMPIRequest() expected insufficient-data error for placeholder ZIP")
 		}
 	})
 }

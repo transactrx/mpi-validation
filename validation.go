@@ -90,6 +90,9 @@ func HasSufficientDataForCreation(patient *InboundPatientIdRequest) bool {
 
 	street := StripNonAlphanumeric(patient.Street)
 	zip := StripNonAlphanumeric(patient.Zip)
+	if !IsValidUSZipCode(zip) {
+		zip = ""
+	}
 
 	bin := StripNonAlphanumeric(patient.Bin)
 	cardHolderId := StripNonAlphanumeric(patient.CardHolderId)
@@ -122,6 +125,23 @@ var usPhoneRe = regexp.MustCompile(`^(?:\([2-9]\d{2}\) ?|[2-9]\d{2}(?:-?|\.?| ?)
 
 func IsValidUSPhoneNumber(phone string) bool {
 	return phone != "" && usPhoneRe.MatchString(phone)
+}
+
+var usZipRe = regexp.MustCompile(`^[0-9]{5}$`)
+
+// IsValidUSZipCode validates the five-digit ZIP signal accepted by the MPI creation
+// sufficiency gate. Repeated-digit values are source-system placeholders rather than
+// usable identifying data.
+func IsValidUSZipCode(zip string) bool {
+	if !usZipRe.MatchString(zip) {
+		return false
+	}
+	for i := 1; i < len(zip); i++ {
+		if zip[i] != zip[0] {
+			return true
+		}
+	}
+	return false
 }
 
 // IsValidNPI validates a National Provider Identifier using the Luhn algorithm.
