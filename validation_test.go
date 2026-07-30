@@ -229,6 +229,31 @@ func TestHasSufficientDataForCreation(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "N/A street placeholder only",
+			patient: InboundPatientIdRequest{Street: "N/A"},
+			want:    false,
+		},
+		{
+			name:    "unknown street placeholder only",
+			patient: InboundPatientIdRequest{Street: "unknown"},
+			want:    false,
+		},
+		{
+			name:    "not available street placeholder only",
+			patient: InboundPatientIdRequest{Street: "Not Available"},
+			want:    false,
+		},
+		{
+			name:    "all-zero street placeholder only",
+			patient: InboundPatientIdRequest{Street: "0000"},
+			want:    false,
+		},
+		{
+			name:    "placeholder token inside legitimate street",
+			patient: InboundPatientIdRequest{Street: "1 Unknown Rd"},
+			want:    true,
+		},
+		{
 			name:    "has zip only",
 			patient: InboundPatientIdRequest{Zip: "10001"},
 			want:    true,

@@ -84,7 +84,7 @@ func ValidateInvalidateRequest(request *InvalidateInsuranceRequest) error {
 // beyond demographics to create a new patient record.
 func HasSufficientDataForCreation(patient *InboundPatientIdRequest) bool {
 	phone := normalizedValidPhone(patient.Phone)
-	street := StripNonAlphanumeric(patient.Street)
+	street := normalizedValidStreet(patient.Street)
 	zip := normalizedValidUSZipCode(patient.Zip)
 
 	bin := StripNonAlphanumeric(patient.Bin)
@@ -128,6 +128,38 @@ func normalizedValidPhone(phone string) string {
 	return ""
 }
 
+var placeholderStreets = map[string]bool{
+	"NA":            true,
+	"NONE":          true,
+	"NULL":          true,
+	"UNKNOWN":       true,
+	"UNAVAILABLE":   true,
+	"NOTAVAILABLE":  true,
+	"NOTAPPLICABLE": true,
+	"NOADDRESS":     true,
+}
+
+// normalizedValidStreet removes formatting and rejects a narrow set of exact
+// source-system placeholders. Substrings are deliberately not matched: legitimate
+// addresses such as "Unknown Rd" or "None Such Rd" must remain usable.
+func normalizedValidStreet(street string) string {
+	street = strings.ToUpper(StripNonAlphanumeric(street))
+	if street == "" || placeholderStreets[street] {
+		return ""
+	}
+	allZero := true
+	for i := 0; i < len(street); i++ {
+		if street[i] != '0' {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		return ""
+	}
+	return street
+}
+
 var usZipRe = regexp.MustCompile(`^[0-9]{5}(?:[0-9]{4})?$`)
 
 // IsValidUSZipCode validates a normalized five-digit ZIP or nine-digit ZIP+4 signal.
@@ -158,7 +190,7 @@ func normalizedValidUSZipCode(zip string) string {
 // placeholders such as ZIP 00000 and phone 0000000000 from bypassing a corroborated
 // identity rule merely because the raw fields are nonblank.
 func hasUsablePatientContact(street, zip, phone string) bool {
-	return StripNonAlphanumeric(street) != "" ||
+	return normalizedValidStreet(street) != "" ||
 		normalizedValidUSZipCode(zip) != "" ||
 		normalizedValidPhone(phone) != ""
 }

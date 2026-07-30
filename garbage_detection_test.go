@@ -241,6 +241,7 @@ func TestInvalidContactCannotBypassCorroboratedPlaceholder(t *testing.T) {
 		LastName:     "smith",
 		DOB:          "19900101",
 		Gender:       "1",
+		Street:       "N/A",
 		Zip:          "00000",
 		Phone:        "0000000000",
 		Bin:          "004336",
