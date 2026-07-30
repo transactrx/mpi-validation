@@ -139,10 +139,22 @@ var placeholderStreets = map[string]bool{
 	"NOADDRESS":     true,
 }
 
-// normalizedValidStreet removes formatting and rejects a narrow set of exact
-// source-system placeholders. Substrings are deliberately not matched: legitimate
-// addresses such as "Unknown Rd" or "None Such Rd" must remain usable.
+// placeholderStreetWithUnitRe rejects a known placeholder base followed only by
+// apartment/unit metadata. It is deliberately anchored so legitimate streets such
+// as "Unknown Rd" and "None Such Rd" remain usable.
+var placeholderStreetWithUnitRe = regexp.MustCompile(
+	`(?i)^\s*(?:n\s*[/.-]?\s*a|none|null|unknown|unavailable|not\s*available|not\s*applicable|no\s*address)` +
+		`(?:[\s,;:-]*(?:(?:apt(?:artment)?|unit|suite|ste)\.?\s*#?\s*[a-z0-9-]*|#\s*[a-z0-9-]+))*\s*$`,
+)
+
+// normalizedValidStreet removes formatting and rejects a narrow set of
+// source-system placeholders, including placeholders decorated solely with unit
+// metadata. Other suffixes are not matched.
 func normalizedValidStreet(street string) string {
+	if placeholderStreetWithUnitRe.MatchString(street) {
+		return ""
+	}
+
 	street = strings.ToUpper(StripNonAlphanumeric(street))
 	if street == "" || placeholderStreets[street] {
 		return ""

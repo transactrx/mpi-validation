@@ -244,6 +244,21 @@ func TestHasSufficientDataForCreation(t *testing.T) {
 			want:    false,
 		},
 		{
+			name:    "N/A street placeholder with number metadata",
+			patient: InboundPatientIdRequest{Street: "N/A #1"},
+			want:    false,
+		},
+		{
+			name:    "unknown street placeholder with apartment metadata",
+			patient: InboundPatientIdRequest{Street: "unknown apt 2"},
+			want:    false,
+		},
+		{
+			name:    "no address street placeholder with unit metadata",
+			patient: InboundPatientIdRequest{Street: "no address unit 3"},
+			want:    false,
+		},
+		{
 			name:    "all-zero street placeholder only",
 			patient: InboundPatientIdRequest{Street: "0000"},
 			want:    false,
@@ -251,6 +266,11 @@ func TestHasSufficientDataForCreation(t *testing.T) {
 		{
 			name:    "placeholder token inside legitimate street",
 			patient: InboundPatientIdRequest{Street: "1 Unknown Rd"},
+			want:    true,
+		},
+		{
+			name:    "placeholder-looking street name without unit-only suffix",
+			patient: InboundPatientIdRequest{Street: "Unknown Rd"},
 			want:    true,
 		},
 		{

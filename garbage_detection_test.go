@@ -236,35 +236,44 @@ func TestClassifyGarbage_CorroboratedPlaceholderFirstNames(t *testing.T) {
 }
 
 func TestInvalidContactCannotBypassCorroboratedPlaceholder(t *testing.T) {
-	patient := InboundPatientIdRequest{
-		FirstName:    "office",
-		LastName:     "smith",
-		DOB:          "19900101",
-		Gender:       "1",
-		Street:       "N/A",
-		Zip:          "00000",
-		Phone:        "0000000000",
-		Bin:          "004336",
-		PCN:          "ADV",
-		CardHolderId: "MEMBER123",
-	}
+	for _, street := range []string{
+		"N/A",
+		"N/A #1",
+		"unknown apt 2",
+		"no address unit 3",
+	} {
+		t.Run(street, func(t *testing.T) {
+			patient := InboundPatientIdRequest{
+				FirstName:    "office",
+				LastName:     "smith",
+				DOB:          "19900101",
+				Gender:       "1",
+				Street:       street,
+				Zip:          "00000",
+				Phone:        "0000000000",
+				Bin:          "004336",
+				PCN:          "ADV",
+				CardHolderId: "MEMBER123",
+			}
 
-	if reason := ClassifyGarbage(
-		patient.FirstName,
-		patient.LastName,
-		patient.DOB,
-		patient.Street,
-		patient.Zip,
-		patient.Phone,
-	); reason != "junk_placeholder" {
-		t.Fatalf("ClassifyGarbage() = %q, want junk_placeholder for invalid contact values", reason)
-	}
+			if reason := ClassifyGarbage(
+				patient.FirstName,
+				patient.LastName,
+				patient.DOB,
+				patient.Street,
+				patient.Zip,
+				patient.Phone,
+			); reason != "junk_placeholder" {
+				t.Fatalf("ClassifyGarbage() = %q, want junk_placeholder for invalid contact values", reason)
+			}
 
-	// Insurance is independently sufficient for creation. This proves the classifier
-	// must catch the placeholder identity before ValidateMPIRequest: the invalid contact
-	// fields cannot be treated as human corroboration merely because they are nonblank.
-	if err := ValidateMPIRequest(&patient); err != nil {
-		t.Fatalf("ValidateMPIRequest() = %v, want nil because valid insurance is sufficient", err)
+			// Insurance is independently sufficient for creation. This proves the
+			// classifier must catch the placeholder identity before ValidateMPIRequest:
+			// invalid contact cannot be human corroboration merely because it is nonblank.
+			if err := ValidateMPIRequest(&patient); err != nil {
+				t.Fatalf("ValidateMPIRequest() = %v, want nil because valid insurance is sufficient", err)
+			}
+		})
 	}
 }
 
@@ -283,6 +292,16 @@ func TestValidContactCorroboratesPlaceholderLikeFirstName(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := ClassifyGarbage("office", "smith", "19900101", "", tt.zip, tt.phone); got != "" {
 				t.Errorf("ClassifyGarbage() = %q, want empty for valid contact", got)
+			}
+		})
+	}
+}
+
+func TestLegitimateStreetCorroboratesPlaceholderLikeFirstName(t *testing.T) {
+	for _, street := range []string{"Unknown Rd", "1 Unknown Rd", "No Address Rd"} {
+		t.Run(street, func(t *testing.T) {
+			if got := ClassifyGarbage("office", "smith", "19900101", street, "", ""); got != "" {
+				t.Errorf("ClassifyGarbage() = %q, want empty for legitimate street", got)
 			}
 		})
 	}
