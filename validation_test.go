@@ -139,10 +139,13 @@ func TestIsValidUSZipCode(t *testing.T) {
 	}{
 		{"10001", true},
 		{"33601", true},
+		{"123456789", true},
 		{"00000", false},
 		{"99999", false},
 		{"11111", false},
 		{"55555", false},
+		{"000001234", false},
+		{"999991234", false},
 		{"1234", false},
 		{"123456", false},
 		{"12345-6789", false},
@@ -228,6 +231,16 @@ func TestHasSufficientDataForCreation(t *testing.T) {
 		{
 			name:    "has zip only",
 			patient: InboundPatientIdRequest{Zip: "10001"},
+			want:    true,
+		},
+		{
+			name:    "has formatted ZIP+4 only",
+			patient: InboundPatientIdRequest{Zip: "12345-6789"},
+			want:    true,
+		},
+		{
+			name:    "has normalized ZIP+4 only",
+			patient: InboundPatientIdRequest{Zip: "123456789"},
 			want:    true,
 		},
 		{

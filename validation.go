@@ -83,16 +83,9 @@ func ValidateInvalidateRequest(request *InvalidateInsuranceRequest) error {
 // If no existing patient is found, the MPI requires at least one identifying data group
 // beyond demographics to create a new patient record.
 func HasSufficientDataForCreation(patient *InboundPatientIdRequest) bool {
-	phone := StripNonAlphanumeric(patient.Phone)
-	if !IsValidUSPhoneNumber(phone) {
-		phone = ""
-	}
-
+	phone := normalizedValidPhone(patient.Phone)
 	street := StripNonAlphanumeric(patient.Street)
-	zip := StripNonAlphanumeric(patient.Zip)
-	if !IsValidUSZipCode(zip) {
-		zip = ""
-	}
+	zip := normalizedValidUSZipCode(patient.Zip)
 
 	bin := StripNonAlphanumeric(patient.Bin)
 	cardHolderId := StripNonAlphanumeric(patient.CardHolderId)
@@ -127,21 +120,47 @@ func IsValidUSPhoneNumber(phone string) bool {
 	return phone != "" && usPhoneRe.MatchString(phone)
 }
 
-var usZipRe = regexp.MustCompile(`^[0-9]{5}$`)
+func normalizedValidPhone(phone string) string {
+	phone = StripNonAlphanumeric(phone)
+	if IsValidUSPhoneNumber(phone) {
+		return phone
+	}
+	return ""
+}
 
-// IsValidUSZipCode validates the five-digit ZIP signal accepted by the MPI creation
-// sufficiency gate. Repeated-digit values are source-system placeholders rather than
-// usable identifying data.
+var usZipRe = regexp.MustCompile(`^[0-9]{5}(?:[0-9]{4})?$`)
+
+// IsValidUSZipCode validates a normalized five-digit ZIP or nine-digit ZIP+4 signal.
+// Repeated-digit five-digit prefixes are source-system placeholders rather than usable
+// identifying data. Callers that accept formatted input should strip punctuation first.
 func IsValidUSZipCode(zip string) bool {
 	if !usZipRe.MatchString(zip) {
 		return false
 	}
-	for i := 1; i < len(zip); i++ {
+	for i := 1; i < 5; i++ {
 		if zip[i] != zip[0] {
 			return true
 		}
 	}
 	return false
+}
+
+func normalizedValidUSZipCode(zip string) string {
+	zip = StripNonAlphanumeric(zip)
+	if IsValidUSZipCode(zip) {
+		return zip
+	}
+	return ""
+}
+
+// hasUsablePatientContact applies the same normalization used by creation sufficiency
+// before treating contact data as corroboration in the garbage classifier. This keeps
+// placeholders such as ZIP 00000 and phone 0000000000 from bypassing a corroborated
+// identity rule merely because the raw fields are nonblank.
+func hasUsablePatientContact(street, zip, phone string) bool {
+	return StripNonAlphanumeric(street) != "" ||
+		normalizedValidUSZipCode(zip) != "" ||
+		normalizedValidPhone(phone) != ""
 }
 
 // IsValidNPI validates a National Provider Identifier using the Luhn algorithm.

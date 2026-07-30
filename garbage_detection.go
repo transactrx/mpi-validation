@@ -213,8 +213,7 @@ func ClassifyGarbage(firstName, lastName, dob, street, zip, phone string) string
 	// "digit-run AND no contact" rule therefore rejected real Medicare-D LTC patients.
 	// There is no reliable standalone signal for the genuinely-synthetic remainder, so
 	// the gate is dropped. hasContact is still computed below for the ambiguous-token rule.
-	hasContact := strings.TrimSpace(street) != "" || strings.TrimSpace(zip) != "" ||
-		strings.TrimSpace(phone) != ""
+	hasContact := hasUsablePatientContact(street, zip, phone)
 
 	cleanedLowerFirst := strings.ToLower(firstNameClean)
 	cleanedLowerLast := strings.ToLower(lastNameClean)

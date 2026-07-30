@@ -235,6 +235,58 @@ func TestClassifyGarbage_CorroboratedPlaceholderFirstNames(t *testing.T) {
 	}
 }
 
+func TestInvalidContactCannotBypassCorroboratedPlaceholder(t *testing.T) {
+	patient := InboundPatientIdRequest{
+		FirstName:    "office",
+		LastName:     "smith",
+		DOB:          "19900101",
+		Gender:       "1",
+		Zip:          "00000",
+		Phone:        "0000000000",
+		Bin:          "004336",
+		PCN:          "ADV",
+		CardHolderId: "MEMBER123",
+	}
+
+	if reason := ClassifyGarbage(
+		patient.FirstName,
+		patient.LastName,
+		patient.DOB,
+		patient.Street,
+		patient.Zip,
+		patient.Phone,
+	); reason != "junk_placeholder" {
+		t.Fatalf("ClassifyGarbage() = %q, want junk_placeholder for invalid contact values", reason)
+	}
+
+	// Insurance is independently sufficient for creation. This proves the classifier
+	// must catch the placeholder identity before ValidateMPIRequest: the invalid contact
+	// fields cannot be treated as human corroboration merely because they are nonblank.
+	if err := ValidateMPIRequest(&patient); err != nil {
+		t.Fatalf("ValidateMPIRequest() = %v, want nil because valid insurance is sufficient", err)
+	}
+}
+
+func TestValidContactCorroboratesPlaceholderLikeFirstName(t *testing.T) {
+	tests := []struct {
+		name  string
+		zip   string
+		phone string
+	}{
+		{"five-digit ZIP", "10001", ""},
+		{"formatted ZIP+4", "12345-6789", ""},
+		{"normalized ZIP+4", "123456789", ""},
+		{"valid phone", "", "2125551234"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ClassifyGarbage("office", "smith", "19900101", "", tt.zip, tt.phone); got != "" {
+				t.Errorf("ClassifyGarbage() = %q, want empty for valid contact", got)
+			}
+		})
+	}
+}
+
 func TestClassifyGarbage_SurnamesMustNotMatch(t *testing.T) {
 	// Real human surnames that END in a pet suffix. We deliberately do NOT match the
 	// species regex against lastName, so these legitimate families must pass. Validated
