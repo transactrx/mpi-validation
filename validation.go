@@ -128,35 +128,16 @@ func normalizedValidPhone(phone string) string {
 	return ""
 }
 
-var placeholderStreets = map[string]bool{
-	"NA":            true,
-	"NONE":          true,
-	"NULL":          true,
-	"UNKNOWN":       true,
-	"UNAVAILABLE":   true,
-	"NOTAVAILABLE":  true,
-	"NOTAPPLICABLE": true,
-	"NOADDRESS":     true,
-}
-
-// placeholderStreetWithUnitRe rejects a known placeholder base followed only by
-// apartment/unit metadata. It is deliberately anchored so legitimate streets such
-// as "Unknown Rd" and "None Such Rd" remain usable.
-var placeholderStreetWithUnitRe = regexp.MustCompile(
-	`(?i)^\s*(?:n\s*[/.-]?\s*a|none|null|unknown|unavailable|not\s*available|not\s*applicable|no\s*address)` +
-		`(?:[\s,;:-]*(?:(?:apt(?:artment)?|unit|suite|ste)\.?\s*#?\s*[a-z0-9-]*|#\s*[a-z0-9-]+))*\s*$`,
-)
-
 // normalizedValidStreet removes formatting and rejects a narrow set of
 // source-system placeholders, including placeholders decorated solely with unit
 // metadata. Other suffixes are not matched.
 func normalizedValidStreet(street string) string {
-	if placeholderStreetWithUnitRe.MatchString(street) {
+	if isPlaceholderStreet(street) {
 		return ""
 	}
 
 	street = strings.ToUpper(StripNonAlphanumeric(street))
-	if street == "" || placeholderStreets[street] {
+	if street == "" {
 		return ""
 	}
 	allZero := true
@@ -170,6 +151,157 @@ func normalizedValidStreet(street string) string {
 		return ""
 	}
 	return street
+}
+
+// streetTokens gives every punctuation character the same separator semantics,
+// except #, which is preserved as a unit designator. This prevents alternate
+// punctuation from changing whether a placeholder is recognized.
+func streetTokens(street string) []string {
+	var normalized strings.Builder
+	normalized.Grow(len(street))
+
+	for i := 0; i < len(street); i++ {
+		char := street[i]
+		switch {
+		case char >= 'a' && char <= 'z':
+			normalized.WriteByte(char - ('a' - 'A'))
+		case char >= 'A' && char <= 'Z', char >= '0' && char <= '9':
+			normalized.WriteByte(char)
+		case char == '#':
+			normalized.WriteString(" # ")
+		default:
+			normalized.WriteByte(' ')
+		}
+	}
+
+	return strings.Fields(normalized.String())
+}
+
+func tokenSequenceMatchLength(tokens []string, candidates map[string]bool) int {
+	joined := ""
+	for i, token := range tokens {
+		// A # before a complete candidate is punctuation within that candidate.
+		// Once a candidate matches, later # tokens remain available as unit markers.
+		if token == "#" {
+			continue
+		}
+
+		joined += token
+		if candidates[joined] {
+			return i + 1
+		}
+
+		canStillMatch := false
+		for candidate := range candidates {
+			if strings.HasPrefix(candidate, joined) {
+				canStillMatch = true
+				break
+			}
+		}
+		if !canStillMatch {
+			return 0
+		}
+	}
+
+	return 0
+}
+
+var placeholderStreetBases = map[string]bool{
+	"NA":            true,
+	"NONE":          true,
+	"NULL":          true,
+	"UNKNOWN":       true,
+	"UNAVAILABLE":   true,
+	"NOTAVAILABLE":  true,
+	"NOTAPPLICABLE": true,
+	"NOADDRESS":     true,
+}
+
+func placeholderStreetBaseLength(tokens []string) int {
+	return tokenSequenceMatchLength(tokens, placeholderStreetBases)
+}
+
+var streetUnitDesignators = map[string]bool{
+	"APT":       true,
+	"APARTMENT": true,
+	"UNIT":      true,
+	"SUITE":     true,
+	"STE":       true,
+}
+
+func isCompactStreetUnitMetadata(token string) bool {
+	for designator := range streetUnitDesignators {
+		if len(token) > len(designator) &&
+			strings.HasPrefix(token, designator) &&
+			token[len(designator)] >= '0' &&
+			token[len(designator)] <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
+func streetUnitDesignatorLength(tokens []string) int {
+	return tokenSequenceMatchLength(tokens, streetUnitDesignators)
+}
+
+func hasASCIIDigit(token string) bool {
+	for i := 0; i < len(token); i++ {
+		if token[i] >= '0' && token[i] <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
+func hasOnlyStreetUnitMetadata(tokens []string) bool {
+	for len(tokens) > 0 {
+		if isCompactStreetUnitMetadata(tokens[0]) {
+			tokens = tokens[1:]
+			continue
+		}
+
+		requiresNumericIdentifier := false
+		if tokens[0] == "#" {
+			tokens = tokens[1:]
+		} else if designatorLength := streetUnitDesignatorLength(tokens); designatorLength > 0 {
+			// A designator assembled from multiple punctuation-separated tokens
+			// needs a numeric identifier (or an explicit #) so U.N.I.T.Y and
+			// A.P.T.O.S cannot be mistaken for UNIT Y and APT OS.
+			requiresNumericIdentifier = designatorLength > 1
+			tokens = tokens[designatorLength:]
+			if len(tokens) > 0 && tokens[0] == "#" {
+				tokens = tokens[1:]
+				requiresNumericIdentifier = false
+			}
+		} else {
+			return false
+		}
+
+		// A unit marker without an identifier is still placeholder metadata.
+		if len(tokens) == 0 {
+			return true
+		}
+		if tokens[0] != "#" &&
+			streetUnitDesignatorLength(tokens) == 0 &&
+			!isCompactStreetUnitMetadata(tokens[0]) {
+			if requiresNumericIdentifier && !hasASCIIDigit(tokens[0]) {
+				return false
+			}
+			tokens = tokens[1:]
+		}
+	}
+
+	return true
+}
+
+func isPlaceholderStreet(street string) bool {
+	tokens := streetTokens(street)
+	baseLength := placeholderStreetBaseLength(tokens)
+	if baseLength == 0 {
+		return false
+	}
+	return hasOnlyStreetUnitMetadata(tokens[baseLength:])
 }
 
 var usZipRe = regexp.MustCompile(`^[0-9]{5}(?:[0-9]{4})?$`)

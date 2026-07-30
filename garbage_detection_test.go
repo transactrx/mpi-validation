@@ -239,8 +239,14 @@ func TestInvalidContactCannotBypassCorroboratedPlaceholder(t *testing.T) {
 	for _, street := range []string{
 		"N/A",
 		"N/A #1",
+		"N_A #1",
+		"N@A apt 1",
+		"not.available apt 1",
+		"no-address unit 3",
 		"unknown apt 2",
 		"no address unit 3",
+		"unknown apt2",
+		"none ste100",
 	} {
 		t.Run(street, func(t *testing.T) {
 			patient := InboundPatientIdRequest{
@@ -298,7 +304,15 @@ func TestValidContactCorroboratesPlaceholderLikeFirstName(t *testing.T) {
 }
 
 func TestLegitimateStreetCorroboratesPlaceholderLikeFirstName(t *testing.T) {
-	for _, street := range []string{"Unknown Rd", "1 Unknown Rd", "No Address Rd"} {
+	for _, street := range []string{
+		"Unknown Rd",
+		"1 Unknown Rd",
+		"No Address Rd",
+		"Unknown Aptos",
+		"Unknown Unity",
+		"None Steuben",
+		"Unknown Unit Circle Rd",
+	} {
 		t.Run(street, func(t *testing.T) {
 			if got := ClassifyGarbage("office", "smith", "19900101", street, "", ""); got != "" {
 				t.Errorf("ClassifyGarbage() = %q, want empty for legitimate street", got)

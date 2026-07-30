@@ -249,6 +249,26 @@ func TestHasSufficientDataForCreation(t *testing.T) {
 			want:    false,
 		},
 		{
+			name:    "N_A street placeholder with number metadata",
+			patient: InboundPatientIdRequest{Street: "N_A #1"},
+			want:    false,
+		},
+		{
+			name:    "N@A street placeholder with apartment metadata",
+			patient: InboundPatientIdRequest{Street: "N@A apt 1"},
+			want:    false,
+		},
+		{
+			name:    "not.available street placeholder with apartment metadata",
+			patient: InboundPatientIdRequest{Street: "not.available apt 1"},
+			want:    false,
+		},
+		{
+			name:    "no-address street placeholder with unit metadata",
+			patient: InboundPatientIdRequest{Street: "no-address unit 3"},
+			want:    false,
+		},
+		{
 			name:    "unknown street placeholder with apartment metadata",
 			patient: InboundPatientIdRequest{Street: "unknown apt 2"},
 			want:    false,
@@ -256,6 +276,16 @@ func TestHasSufficientDataForCreation(t *testing.T) {
 		{
 			name:    "no address street placeholder with unit metadata",
 			patient: InboundPatientIdRequest{Street: "no address unit 3"},
+			want:    false,
+		},
+		{
+			name:    "unknown street placeholder with compact apartment metadata",
+			patient: InboundPatientIdRequest{Street: "unknown apt2"},
+			want:    false,
+		},
+		{
+			name:    "none street placeholder with compact suite metadata",
+			patient: InboundPatientIdRequest{Street: "none ste100"},
 			want:    false,
 		},
 		{
@@ -271,6 +301,26 @@ func TestHasSufficientDataForCreation(t *testing.T) {
 		{
 			name:    "placeholder-looking street name without unit-only suffix",
 			patient: InboundPatientIdRequest{Street: "Unknown Rd"},
+			want:    true,
+		},
+		{
+			name:    "apartment prefix in legitimate street token",
+			patient: InboundPatientIdRequest{Street: "Unknown Aptos"},
+			want:    true,
+		},
+		{
+			name:    "unit prefix in legitimate street token",
+			patient: InboundPatientIdRequest{Street: "Unknown Unity"},
+			want:    true,
+		},
+		{
+			name:    "suite prefix in legitimate street token",
+			patient: InboundPatientIdRequest{Street: "None Steuben"},
+			want:    true,
+		},
+		{
+			name:    "unit metadata followed by street words",
+			patient: InboundPatientIdRequest{Street: "Unknown Unit Circle Rd"},
 			want:    true,
 		},
 		{
@@ -361,6 +411,118 @@ func TestHasSufficientDataForCreation(t *testing.T) {
 				t.Errorf("HasSufficientDataForCreation() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPlaceholderStreetPunctuationNormalization(t *testing.T) {
+	for separator := byte(0); separator < 128; separator++ {
+		if separator >= 'A' && separator <= 'Z' ||
+			separator >= 'a' && separator <= 'z' ||
+			separator >= '0' && separator <= '9' {
+			continue
+		}
+
+		punctuation := string(separator)
+		for _, street := range []string{
+			"N" + punctuation + "A apt 1",
+			"not" + punctuation + "available unit 2",
+			"no" + punctuation + "address #3",
+			"N/A A" + punctuation + "P" + punctuation + "T 1",
+			"unknown U" + punctuation + "N" + punctuation + "I" + punctuation + "T 2",
+		} {
+			if got := normalizedValidStreet(street); got != "" {
+				t.Errorf("normalizedValidStreet(%q) = %q, want empty", street, got)
+			}
+		}
+
+		for base := range placeholderStreetBases {
+			for split := 1; split < len(base); split++ {
+				street := base[:split] + punctuation + base[split:] + " apt 1"
+				if got := normalizedValidStreet(street); got != "" {
+					t.Errorf("normalizedValidStreet(%q) = %q, want empty", street, got)
+				}
+			}
+		}
+
+		for designator := range streetUnitDesignators {
+			for split := 1; split < len(designator); split++ {
+				street := "unknown " +
+					designator[:split] + punctuation + designator[split:] + " 1"
+				if got := normalizedValidStreet(street); got != "" {
+					t.Errorf("normalizedValidStreet(%q) = %q, want empty", street, got)
+				}
+			}
+		}
+	}
+
+	for _, street := range []string{
+		"N•A apt 1",
+		"not—available unit 2",
+		"no…address #3",
+		"N/A A•P•T 1",
+	} {
+		if got := normalizedValidStreet(street); got != "" {
+			t.Errorf("normalizedValidStreet(%q) = %q, want empty", street, got)
+		}
+	}
+}
+
+func TestPlaceholderStreetUnitDesignatorBoundaries(t *testing.T) {
+	for _, street := range []string{
+		"Unknown Aptos",
+		"Unknown Aptos2",
+		"Unknown Unity",
+		"Unknown Unity7",
+		"None Steuben",
+		"None Steuben2",
+		"Unknown Suiteable",
+		"Unknown Unit Circle Rd",
+		"Unknown A.P.T.O.S",
+		"Unknown U.N.I.T.Y",
+		"None S.T.E.U.B.E.N",
+	} {
+		t.Run(street, func(t *testing.T) {
+			if got := normalizedValidStreet(street); got == "" {
+				t.Errorf("normalizedValidStreet(%q) = empty, want legitimate street", street)
+			}
+		})
+	}
+
+	for _, street := range []string{
+		"N/A apt B",
+		"N/A apt #1",
+		"N/A apt",
+		"N/A apt unit 2",
+		"N/A # #1",
+		"N/A a.p.t 1",
+		"N/A u.n.i.t #B",
+		"unknown apt2",
+		"unknown apartment3A",
+		"unknown unit4",
+		"none suite500",
+		"none ste100",
+	} {
+		t.Run(street, func(t *testing.T) {
+			if got := normalizedValidStreet(street); got != "" {
+				t.Errorf("normalizedValidStreet(%q) = %q, want empty", street, got)
+			}
+		})
+	}
+
+	for designator := range streetUnitDesignators {
+		for suffix := byte('A'); suffix <= 'Z'; suffix++ {
+			street := "Unknown " + designator + string(suffix)
+			if got := normalizedValidStreet(street); got == "" {
+				t.Errorf("normalizedValidStreet(%q) = empty, want legitimate street", street)
+			}
+		}
+
+		for suffix := byte('0'); suffix <= '9'; suffix++ {
+			street := "Unknown " + designator + string(suffix)
+			if got := normalizedValidStreet(street); got != "" {
+				t.Errorf("normalizedValidStreet(%q) = %q, want empty", street, got)
+			}
+		}
 	}
 }
 
