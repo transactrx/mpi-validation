@@ -33,6 +33,10 @@ func int64Pointer(value int64) *int64 {
 	return &value
 }
 
+func stringPointer(value string) *string {
+	return &value
+}
+
 func testGate(backend gateBackend, mode Mode) *Gate {
 	return &Gate{
 		backend: backend,
@@ -44,40 +48,26 @@ func testGate(backend gateBackend, mode Mode) *Gate {
 func TestGateClassify(t *testing.T) {
 	backend := &fakeBackend{
 		data: map[string]binRules{
-			"100000": {
-				records: []ruleRecord{
-					{BINPayerTypeID: int64Pointer(PayerTypeCash)},
-				},
-			},
-			"200000": {
-				records: []ruleRecord{
-					{BINPayerTypeID: int64Pointer(3)},
-					{PCN: "PCNX", PCNPayerTypeID: int64Pointer(PayerTypeNonAdjudicatedCash)},
-				},
-			},
-			"300000": {
-				records: []ruleRecord{
-					{BINPayerTypeID: int64Pointer(PayerTypeCash)},
-					{PCN: "PCNY", GroupID: "GROUP1", PCNPayerTypeID: int64Pointer(3)},
-				},
-			},
-			"400000": {
-				records: []ruleRecord{
-					{BINPayerTypeID: int64Pointer(PayerTypeNonAdjudicatedCash)},
-				},
-			},
-			"500000": {
-				records: []ruleRecord{
-					{BINPayerTypeID: int64Pointer(3)},
-				},
-				isTest: true,
-			},
-			"600000": {
-				records: []ruleRecord{
-					{BINPayerTypeID: int64Pointer(PayerTypeCash)},
-				},
-				isTest: true,
-			},
+			"100000": compileBINRules([]ruleRecord{
+				{BINPayerTypeID: int64Pointer(PayerTypeCash)},
+			}),
+			"200000": compileBINRules([]ruleRecord{
+				{BINPayerTypeID: int64Pointer(3)},
+				{PCN: "PCNX", PCNPayerTypeID: int64Pointer(PayerTypeNonAdjudicatedCash)},
+			}),
+			"300000": compileBINRules([]ruleRecord{
+				{BINPayerTypeID: int64Pointer(PayerTypeCash)},
+				{PCN: "PCNY", GroupID: "GROUP1", PCNPayerTypeID: int64Pointer(3)},
+			}),
+			"400000": compileBINRules([]ruleRecord{
+				{BINPayerTypeID: int64Pointer(PayerTypeNonAdjudicatedCash)},
+			}),
+			"500000": compileBINRules([]ruleRecord{
+				{BINPayerTypeID: int64Pointer(3), Name: stringPointer("PowerLine Test Claims")},
+			}),
+			"600000": compileBINRules([]ruleRecord{
+				{BINPayerTypeID: int64Pointer(PayerTypeCash), Name: stringPointer("Test Cash Plan")},
+			}),
 		},
 	}
 	gate := testGate(backend, ModeSnapshot)
@@ -151,18 +141,12 @@ func TestGateClassify(t *testing.T) {
 func TestGateBooleanCompatibilityMethods(t *testing.T) {
 	backend := &fakeBackend{
 		data: map[string]binRules{
-			"100000": {
-				records: []ruleRecord{
-					{BINPayerTypeID: int64Pointer(PayerTypeCash)},
-				},
-				isTest: true,
-			},
-			"200000": {
-				records: []ruleRecord{
-					{BINPayerTypeID: int64Pointer(3)},
-				},
-				isTest: true,
-			},
+			"100000": compileBINRules([]ruleRecord{
+				{BINPayerTypeID: int64Pointer(PayerTypeCash), Name: stringPointer("Test Cash Plan")},
+			}),
+			"200000": compileBINRules([]ruleRecord{
+				{BINPayerTypeID: int64Pointer(3), Name: stringPointer("Test Commercial Plan")},
+			}),
 		},
 	}
 	gate := testGate(backend, ModeLive)
@@ -184,13 +168,10 @@ func TestGateBooleanCompatibilityMethods(t *testing.T) {
 func TestClassifyReadsOneCorrelatedBINView(t *testing.T) {
 	backend := &fakeBackend{
 		data: map[string]binRules{
-			"100000": {
-				records: []ruleRecord{
-					{BINPayerTypeID: int64Pointer(3)},
-					{PCN: "PCNX", PCNPayerTypeID: int64Pointer(3)},
-				},
-				isTest: true,
-			},
+			"100000": compileBINRules([]ruleRecord{
+				{BINPayerTypeID: int64Pointer(3), Name: stringPointer("Test Commercial Plan")},
+				{PCN: "PCNX", PCNPayerTypeID: int64Pointer(3), Name: stringPointer("Test Commercial Plan")},
+			}),
 		},
 	}
 	gate := testGate(backend, ModeSnapshot)

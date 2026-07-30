@@ -177,49 +177,33 @@ func (g *Gate) Classify(bin, pcn, group string) Classification {
 	}
 
 	rules := g.backend.rulesForBIN(bin)
-	if len(rules.records) == 0 {
+	if !rules.known {
 		return ClassificationUnknownBIN
 	}
 
 	if pcn != "" && group != "" {
-		if classification, found := classifyPCNRecords(rules, pcn, group); found {
-			return classification
+		if cash, found := rules.pcnCash[pcnRuleKey{pcn: pcn, group: group}]; found {
+			return classifyKnownRule(cash, rules.isTest)
 		}
 	}
 
 	if pcn != "" {
-		if classification, found := classifyPCNRecords(rules, pcn, ""); found {
-			return classification
+		if cash, found := rules.pcnCash[pcnRuleKey{pcn: pcn}]; found {
+			return classifyKnownRule(cash, rules.isTest)
 		}
 	}
 
-	if anyCashBIN(rules.records) {
+	return classifyKnownRule(rules.binFound && rules.binCash, rules.isTest)
+}
+
+func classifyKnownRule(cash, test bool) Classification {
+	if cash {
 		return ClassificationCash
 	}
-	if rules.isTest {
+	if test {
 		return ClassificationTest
 	}
 	return ClassificationKnownOther
-}
-
-func classifyPCNRecords(rules binRules, pcn, group string) (Classification, bool) {
-	found := false
-	for _, record := range rules.records {
-		if record.PCN != pcn || record.GroupID != group {
-			continue
-		}
-		found = true
-		if isCashPayerType(record.PCNPayerTypeID) {
-			return ClassificationCash, true
-		}
-	}
-	if !found {
-		return "", false
-	}
-	if rules.isTest {
-		return ClassificationTest, true
-	}
-	return ClassificationKnownOther, true
 }
 
 // IsCashProgram reports whether Classify resolves to ClassificationCash.
@@ -305,15 +289,6 @@ func normalizeConfig(cfg Config) (Config, error) {
 
 func normalizeKeyPart(value string) string {
 	return strings.ToUpper(strings.TrimSpace(value))
-}
-
-func anyCashBIN(records []ruleRecord) bool {
-	for _, record := range records {
-		if record.PCN == "" && record.GroupID == "" && isCashPayerType(record.BINPayerTypeID) {
-			return true
-		}
-	}
-	return false
 }
 
 func isCashPayerType(id *int64) bool {

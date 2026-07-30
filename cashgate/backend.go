@@ -27,11 +27,52 @@ type ruleRecord struct {
 	PCNPayerTypeID *int64  `db:"pcn_payer_type_id"`
 }
 
-// binRules is one immutable, internally consistent view of every RULEDATA row
-// for a BIN plus the test-payer signal derived from those same rows.
+type pcnRuleKey struct {
+	pcn   string
+	group string
+}
+
+// binRules is one immutable, pre-indexed view of every RULEDATA row for a BIN
+// plus the test-payer signal derived from those same rows.
 type binRules struct {
-	records []ruleRecord
-	isTest  bool
+	known    bool
+	binFound bool
+	binCash  bool
+	pcnCash  map[pcnRuleKey]bool
+	isTest   bool
+}
+
+func compileBINRules(records []ruleRecord) binRules {
+	if len(records) == 0 {
+		return binRules{}
+	}
+
+	rules := binRules{
+		known:   true,
+		pcnCash: make(map[pcnRuleKey]bool),
+	}
+	for _, record := range records {
+		if record.PCN == "" && record.GroupID == "" {
+			rules.binFound = true
+			if record.Name != nil && mpivalidation.IsTestPayorName(*record.Name) {
+				rules.isTest = true
+			}
+			if isCashPayerType(record.BINPayerTypeID) {
+				rules.binCash = true
+			}
+			continue
+		}
+
+		key := pcnRuleKey{pcn: record.PCN, group: record.GroupID}
+		if isCashPayerType(record.PCNPayerTypeID) {
+			rules.pcnCash[key] = true
+		} else if _, found := rules.pcnCash[key]; !found {
+			// Presence with a false value is an authoritative known-other
+			// override. Do not lose it merely because it is not cash.
+			rules.pcnCash[key] = false
+		}
+	}
+	return rules
 }
 
 type gateBackend interface {
@@ -41,7 +82,14 @@ type gateBackend interface {
 }
 
 type liveBackend struct {
-	cache snowflakecache.DbCache[ruleRecord]
+	cache    snowflakecache.DbCache[ruleRecord]
+	compiled sync.Map
+}
+
+type cachedBINRules struct {
+	firstRecord *ruleRecord
+	recordCount int
+	rules       binRules
 }
 
 func newLiveBackend(db *sql.DB, cfg Config) (*liveBackend, error) {
@@ -61,19 +109,35 @@ func newLiveBackend(db *sql.DB, cfg Config) (*liveBackend, error) {
 }
 
 func (b *liveBackend) rulesForBIN(bin string) binRules {
-	records := b.cache.Get(normalizeKeyPart(bin))
-	rules := binRules{records: records}
-	for _, record := range records {
-		if record.Name != nil && mpivalidation.IsTestPayorName(*record.Name) {
-			rules.isTest = true
-			break
+	bin = normalizeKeyPart(bin)
+	records := b.cache.Get(bin)
+	if len(records) == 0 {
+		return binRules{}
+	}
+
+	firstRecord := &records[0]
+	if cachedValue, found := b.compiled.Load(bin); found {
+		cached := cachedValue.(cachedBINRules)
+		if cached.firstRecord == firstRecord && cached.recordCount == len(records) {
+			return cached.rules
 		}
 	}
+
+	rules := compileBINRules(records)
+	b.compiled.Store(bin, cachedBINRules{
+		firstRecord: firstRecord,
+		recordCount: len(records),
+		rules:       rules,
+	})
 	return rules
 }
 
 func (b *liveBackend) forceRefresh() error {
-	return b.cache.ForceRefresh()
+	if err := b.cache.ForceRefresh(); err != nil {
+		return err
+	}
+	b.compiled.Clear()
+	return nil
 }
 
 func (b *liveBackend) onRefreshError(handler func(error, int)) {
@@ -121,7 +185,7 @@ func (b *snapshotBackend) reload() error {
 		_ = rows.Close()
 	}()
 
-	byBIN := make(map[string]binRules)
+	rawByBIN := make(map[string][]ruleRecord)
 	for rows.Next() {
 		var (
 			record         ruleRecord
@@ -145,13 +209,9 @@ func (b *snapshotBackend) reload() error {
 		record.PCN = normalizeKeyPart(record.PCN)
 		record.GroupID = normalizeKeyPart(record.GroupID)
 		record.Key = record.BIN
-		rules := byBIN[record.BIN]
 		if name.Valid {
 			value := name.String
 			record.Name = &value
-			if mpivalidation.IsTestPayorName(value) {
-				rules.isTest = true
-			}
 		}
 		if binPayerTypeID.Valid {
 			value := binPayerTypeID.Int64
@@ -161,13 +221,16 @@ func (b *snapshotBackend) reload() error {
 			value := pcnPayerTypeID.Int64
 			record.PCNPayerTypeID = &value
 		}
-		rules.records = append(rules.records, record)
-		byBIN[record.BIN] = rules
+		rawByBIN[record.BIN] = append(rawByBIN[record.BIN], record)
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate RULEDATA rows: %w", err)
 	}
 
+	byBIN := make(map[string]binRules, len(rawByBIN))
+	for bin, records := range rawByBIN {
+		byBIN[bin] = compileBINRules(records)
+	}
 	b.replace(byBIN)
 	return nil
 }

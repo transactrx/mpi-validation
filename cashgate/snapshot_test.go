@@ -177,10 +177,7 @@ func TestSnapshotConcurrentReadsAndReplacement(t *testing.T) {
 	backend := &snapshotBackend{}
 	backend.replace(
 		map[string]binRules{
-			"100000": {
-				records: []ruleRecord{{BINPayerTypeID: cash}},
-				isTest:  false,
-			},
+			"100000": compileBINRules([]ruleRecord{{BINPayerTypeID: cash}}),
 		},
 	)
 	gate := testGate(backend, ModeSnapshot)
@@ -214,20 +211,17 @@ func TestSnapshotConcurrentReadsAndReplacement(t *testing.T) {
 			if iteration%2 == 0 {
 				backend.replace(
 					map[string]binRules{
-						"100000": {
-							records: []ruleRecord{{BINPayerTypeID: cash}},
-							isTest:  false,
-						},
+						"100000": compileBINRules([]ruleRecord{{BINPayerTypeID: cash}}),
 					},
 				)
 				continue
 			}
 			backend.replace(
 				map[string]binRules{
-					"100000": {
-						records: []ruleRecord{{BINPayerTypeID: ordinary}},
-						isTest:  true,
-					},
+					"100000": compileBINRules([]ruleRecord{{
+						BINPayerTypeID: ordinary,
+						Name:           stringPointer("Test Commercial Plan"),
+					}}),
 				},
 			)
 		}
