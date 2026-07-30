@@ -156,9 +156,13 @@ func (g *Gate) IsEnabled() bool {
 //
 //	BIN.PCN.GROUP -> BIN.PCN -> BIN
 //
-// A present PCN/group rule is authoritative, including when it says
-// "not cash"; the lookup does not fall through to a broader cash BIN in that
-// case. Cash takes precedence over test when both signals are present because
+// The backend returns every rule and the test-payer signal for the BIN from one
+// immutable cache view. A refresh therefore cannot mix payer data from one
+// ruleset with test status from another.
+//
+// A present PCN/group rule is authoritative, including when it says "not
+// cash"; the lookup does not fall through to a broader cash BIN in that case.
+// Cash takes precedence over test when both signals are present because
 // existing callers check cash before test.
 func (g *Gate) Classify(bin, pcn, group string) Classification {
 	if !g.IsEnabled() {
@@ -172,39 +176,50 @@ func (g *Gate) Classify(bin, pcn, group string) Classification {
 		return ClassificationNoBIN
 	}
 
+	rules := g.backend.rulesForBIN(bin)
+	if len(rules.records) == 0 {
+		return ClassificationUnknownBIN
+	}
+
 	if pcn != "" && group != "" {
-		if records := g.backend.get(buildCacheKey(bin, pcn, group)); len(records) > 0 {
-			return g.classifyPCNRecords(bin, records)
+		if classification, found := classifyPCNRecords(rules, pcn, group); found {
+			return classification
 		}
 	}
 
 	if pcn != "" {
-		if records := g.backend.get(buildCacheKey(bin, pcn, "")); len(records) > 0 {
-			return g.classifyPCNRecords(bin, records)
+		if classification, found := classifyPCNRecords(rules, pcn, ""); found {
+			return classification
 		}
 	}
 
-	records := g.backend.get(buildCacheKey(bin, "", ""))
-	if len(records) == 0 {
-		return ClassificationUnknownBIN
-	}
-	if anyCashBIN(records) {
+	if anyCashBIN(rules.records) {
 		return ClassificationCash
 	}
-	if g.backend.isTestPayor(bin) {
+	if rules.isTest {
 		return ClassificationTest
 	}
 	return ClassificationKnownOther
 }
 
-func (g *Gate) classifyPCNRecords(bin string, records []ruleRecord) Classification {
-	if anyCashPCN(records) {
-		return ClassificationCash
+func classifyPCNRecords(rules binRules, pcn, group string) (Classification, bool) {
+	found := false
+	for _, record := range rules.records {
+		if record.PCN != pcn || record.GroupID != group {
+			continue
+		}
+		found = true
+		if isCashPayerType(record.PCNPayerTypeID) {
+			return ClassificationCash, true
+		}
 	}
-	if g.backend.isTestPayor(bin) {
-		return ClassificationTest
+	if !found {
+		return "", false
 	}
-	return ClassificationKnownOther
+	if rules.isTest {
+		return ClassificationTest, true
+	}
+	return ClassificationKnownOther, true
 }
 
 // IsCashProgram reports whether Classify resolves to ClassificationCash.
@@ -220,7 +235,7 @@ func (g *Gate) IsTestPayor(bin string) bool {
 		return false
 	}
 	bin = normalizeKeyPart(bin)
-	return bin != "" && g.backend.isTestPayor(bin)
+	return bin != "" && g.backend.rulesForBIN(bin).isTest
 }
 
 // ForceRefresh synchronously replaces the current ruleset. In ModeSnapshot it
@@ -292,22 +307,9 @@ func normalizeKeyPart(value string) string {
 	return strings.ToUpper(strings.TrimSpace(value))
 }
 
-func buildCacheKey(bin, pcn, group string) string {
-	return normalizeKeyPart(bin) + "." + normalizeKeyPart(pcn) + "." + normalizeKeyPart(group)
-}
-
-func anyCashPCN(records []ruleRecord) bool {
-	for _, record := range records {
-		if isCashPayerType(record.PCNPayerTypeID) {
-			return true
-		}
-	}
-	return false
-}
-
 func anyCashBIN(records []ruleRecord) bool {
 	for _, record := range records {
-		if isCashPayerType(record.BINPayerTypeID) {
+		if record.PCN == "" && record.GroupID == "" && isCashPayerType(record.BINPayerTypeID) {
 			return true
 		}
 	}

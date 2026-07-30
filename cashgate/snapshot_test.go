@@ -176,13 +176,21 @@ func TestSnapshotConcurrentReadsAndReplacement(t *testing.T) {
 	ordinary := int64Pointer(3)
 	backend := &snapshotBackend{}
 	backend.replace(
-		map[string][]ruleRecord{
-			"100000..": {{BINPayerTypeID: cash}},
+		map[string]binRules{
+			"100000": {
+				records: []ruleRecord{{BINPayerTypeID: cash}},
+				isTest:  false,
+			},
 		},
-		map[string]struct{}{},
 	)
 	gate := testGate(backend, ModeSnapshot)
 
+	// The only valid correlated states are:
+	//   snapshot A: cash payer, not test -> cash
+	//   snapshot B: ordinary payer, test -> test
+	//
+	// A known-other result would prove that Classify combined snapshot B's
+	// payer data with snapshot A's test status.
 	var waitGroup sync.WaitGroup
 	for reader := 0; reader < 8; reader++ {
 		waitGroup.Add(1)
@@ -191,11 +199,10 @@ func TestSnapshotConcurrentReadsAndReplacement(t *testing.T) {
 			for iteration := 0; iteration < 1_000; iteration++ {
 				classification := gate.Classify("100000", "", "")
 				if classification != ClassificationCash &&
-					classification != ClassificationKnownOther {
+					classification != ClassificationTest {
 					t.Errorf("concurrent classification = %q", classification)
 					return
 				}
-				_ = gate.IsTestPayor("100000")
 			}
 		}()
 	}
@@ -206,18 +213,22 @@ func TestSnapshotConcurrentReadsAndReplacement(t *testing.T) {
 		for iteration := 0; iteration < 1_000; iteration++ {
 			if iteration%2 == 0 {
 				backend.replace(
-					map[string][]ruleRecord{
-						"100000..": {{BINPayerTypeID: cash}},
+					map[string]binRules{
+						"100000": {
+							records: []ruleRecord{{BINPayerTypeID: cash}},
+							isTest:  false,
+						},
 					},
-					map[string]struct{}{},
 				)
 				continue
 			}
 			backend.replace(
-				map[string][]ruleRecord{
-					"100000..": {{BINPayerTypeID: ordinary}},
+				map[string]binRules{
+					"100000": {
+						records: []ruleRecord{{BINPayerTypeID: ordinary}},
+						isTest:  true,
+					},
 				},
-				map[string]struct{}{},
 			)
 		}
 	}()

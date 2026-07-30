@@ -27,9 +27,15 @@ type ruleRecord struct {
 	PCNPayerTypeID *int64  `db:"pcn_payer_type_id"`
 }
 
+// binRules is one immutable, internally consistent view of every RULEDATA row
+// for a BIN plus the test-payer signal derived from those same rows.
+type binRules struct {
+	records []ruleRecord
+	isTest  bool
+}
+
 type gateBackend interface {
-	get(key string) []ruleRecord
-	isTestPayor(bin string) bool
+	rulesForBIN(bin string) binRules
 	forceRefresh() error
 	onRefreshError(handler func(error, int))
 }
@@ -54,17 +60,16 @@ func newLiveBackend(db *sql.DB, cfg Config) (*liveBackend, error) {
 	return &liveBackend{cache: cache}, nil
 }
 
-func (b *liveBackend) get(key string) []ruleRecord {
-	return b.cache.Get(key)
-}
-
-func (b *liveBackend) isTestPayor(bin string) bool {
-	for _, record := range b.cache.Get(buildCacheKey(bin, "", "")) {
+func (b *liveBackend) rulesForBIN(bin string) binRules {
+	records := b.cache.Get(normalizeKeyPart(bin))
+	rules := binRules{records: records}
+	for _, record := range records {
 		if record.Name != nil && mpivalidation.IsTestPayorName(*record.Name) {
-			return true
+			rules.isTest = true
+			break
 		}
 	}
-	return false
+	return rules
 }
 
 func (b *liveBackend) forceRefresh() error {
@@ -76,11 +81,10 @@ func (b *liveBackend) onRefreshError(handler func(error, int)) {
 }
 
 type snapshotBackend struct {
-	db       *sql.DB
-	query    string
-	mu       sync.RWMutex
-	byKey    map[string][]ruleRecord
-	testBINs map[string]struct{}
+	db    *sql.DB
+	query string
+	mu    sync.RWMutex
+	byBIN map[string]binRules
 }
 
 func newSnapshotBackend(db *sql.DB, cfg Config) (*snapshotBackend, error) {
@@ -94,17 +98,10 @@ func newSnapshotBackend(db *sql.DB, cfg Config) (*snapshotBackend, error) {
 	return backend, nil
 }
 
-func (b *snapshotBackend) get(key string) []ruleRecord {
+func (b *snapshotBackend) rulesForBIN(bin string) binRules {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.byKey[key]
-}
-
-func (b *snapshotBackend) isTestPayor(bin string) bool {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	_, ok := b.testBINs[normalizeKeyPart(bin)]
-	return ok
+	return b.byBIN[normalizeKeyPart(bin)]
 }
 
 func (b *snapshotBackend) forceRefresh() error {
@@ -124,8 +121,7 @@ func (b *snapshotBackend) reload() error {
 		_ = rows.Close()
 	}()
 
-	byKey := make(map[string][]ruleRecord)
-	testBINs := make(map[string]struct{})
+	byBIN := make(map[string]binRules)
 	for rows.Next() {
 		var (
 			record         ruleRecord
@@ -148,12 +144,13 @@ func (b *snapshotBackend) reload() error {
 		record.BIN = normalizeKeyPart(record.BIN)
 		record.PCN = normalizeKeyPart(record.PCN)
 		record.GroupID = normalizeKeyPart(record.GroupID)
-		record.Key = buildCacheKey(record.BIN, record.PCN, record.GroupID)
+		record.Key = record.BIN
+		rules := byBIN[record.BIN]
 		if name.Valid {
 			value := name.String
 			record.Name = &value
 			if mpivalidation.IsTestPayorName(value) {
-				testBINs[record.BIN] = struct{}{}
+				rules.isTest = true
 			}
 		}
 		if binPayerTypeID.Valid {
@@ -164,20 +161,20 @@ func (b *snapshotBackend) reload() error {
 			value := pcnPayerTypeID.Int64
 			record.PCNPayerTypeID = &value
 		}
-		byKey[record.Key] = append(byKey[record.Key], record)
+		rules.records = append(rules.records, record)
+		byBIN[record.BIN] = rules
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate RULEDATA rows: %w", err)
 	}
 
-	b.replace(byKey, testBINs)
+	b.replace(byBIN)
 	return nil
 }
 
-func (b *snapshotBackend) replace(byKey map[string][]ruleRecord, testBINs map[string]struct{}) {
+func (b *snapshotBackend) replace(byBIN map[string]binRules) {
 	b.mu.Lock()
-	b.byKey = byKey
-	b.testBINs = testBINs
+	b.byBIN = byBIN
 	b.mu.Unlock()
 }
 
@@ -187,7 +184,7 @@ func payerTypeSQL(database, schema string) string {
 
 	return `
   SELECT DISTINCT
-    UPPER(TRIM(rdp.BIN)) || '..' AS "key",
+    UPPER(TRIM(rdp.BIN)) AS "key",
     UPPER(TRIM(rdp.BIN)) AS "bin",
     '' AS "pcn",
     '' AS "group_id",
@@ -198,9 +195,7 @@ func payerTypeSQL(database, schema string) string {
   WHERE rdp.BIN IS NOT NULL
 UNION ALL
   SELECT DISTINCT
-    UPPER(TRIM(rdp.BIN)) || '.' ||
-      UPPER(TRIM(IFNULL(rdpp.NUMBER, ''))) || '.' ||
-      UPPER(TRIM(IFNULL(rdpp.GROUP_ID, ''))) AS "key",
+    UPPER(TRIM(rdp.BIN)) AS "key",
     UPPER(TRIM(rdp.BIN)) AS "bin",
     UPPER(TRIM(IFNULL(rdpp.NUMBER, ''))) AS "pcn",
     UPPER(TRIM(IFNULL(rdpp.GROUP_ID, ''))) AS "group_id",

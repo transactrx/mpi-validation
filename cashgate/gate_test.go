@@ -8,19 +8,16 @@ import (
 )
 
 type fakeBackend struct {
-	data           map[string][]ruleRecord
-	testBINs       map[string]bool
+	data           map[string]binRules
+	rulesCalls     int
 	forceErr       error
 	forceCalls     int
 	refreshHandler func(error, int)
 }
 
-func (b *fakeBackend) get(key string) []ruleRecord {
-	return b.data[key]
-}
-
-func (b *fakeBackend) isTestPayor(bin string) bool {
-	return b.testBINs[normalizeKeyPart(bin)]
+func (b *fakeBackend) rulesForBIN(bin string) binRules {
+	b.rulesCalls++
+	return b.data[normalizeKeyPart(bin)]
 }
 
 func (b *fakeBackend) forceRefresh() error {
@@ -46,35 +43,41 @@ func testGate(backend gateBackend, mode Mode) *Gate {
 
 func TestGateClassify(t *testing.T) {
 	backend := &fakeBackend{
-		data: map[string][]ruleRecord{
-			"100000..": {
-				{BINPayerTypeID: int64Pointer(PayerTypeCash)},
+		data: map[string]binRules{
+			"100000": {
+				records: []ruleRecord{
+					{BINPayerTypeID: int64Pointer(PayerTypeCash)},
+				},
 			},
-			"200000..": {
-				{BINPayerTypeID: int64Pointer(3)},
+			"200000": {
+				records: []ruleRecord{
+					{BINPayerTypeID: int64Pointer(3)},
+					{PCN: "PCNX", PCNPayerTypeID: int64Pointer(PayerTypeNonAdjudicatedCash)},
+				},
 			},
-			"200000.PCNX.": {
-				{PCNPayerTypeID: int64Pointer(PayerTypeNonAdjudicatedCash)},
+			"300000": {
+				records: []ruleRecord{
+					{BINPayerTypeID: int64Pointer(PayerTypeCash)},
+					{PCN: "PCNY", GroupID: "GROUP1", PCNPayerTypeID: int64Pointer(3)},
+				},
 			},
-			"300000..": {
-				{BINPayerTypeID: int64Pointer(PayerTypeCash)},
+			"400000": {
+				records: []ruleRecord{
+					{BINPayerTypeID: int64Pointer(PayerTypeNonAdjudicatedCash)},
+				},
 			},
-			"300000.PCNY.GROUP1": {
-				{PCNPayerTypeID: int64Pointer(3)},
+			"500000": {
+				records: []ruleRecord{
+					{BINPayerTypeID: int64Pointer(3)},
+				},
+				isTest: true,
 			},
-			"400000..": {
-				{BINPayerTypeID: int64Pointer(PayerTypeNonAdjudicatedCash)},
+			"600000": {
+				records: []ruleRecord{
+					{BINPayerTypeID: int64Pointer(PayerTypeCash)},
+				},
+				isTest: true,
 			},
-			"500000..": {
-				{BINPayerTypeID: int64Pointer(3)},
-			},
-			"600000..": {
-				{BINPayerTypeID: int64Pointer(PayerTypeCash)},
-			},
-		},
-		testBINs: map[string]bool{
-			"500000": true,
-			"600000": true,
 		},
 	}
 	gate := testGate(backend, ModeSnapshot)
@@ -147,17 +150,19 @@ func TestGateClassify(t *testing.T) {
 
 func TestGateBooleanCompatibilityMethods(t *testing.T) {
 	backend := &fakeBackend{
-		data: map[string][]ruleRecord{
-			"100000..": {
-				{BINPayerTypeID: int64Pointer(PayerTypeCash)},
+		data: map[string]binRules{
+			"100000": {
+				records: []ruleRecord{
+					{BINPayerTypeID: int64Pointer(PayerTypeCash)},
+				},
+				isTest: true,
 			},
-			"200000..": {
-				{BINPayerTypeID: int64Pointer(3)},
+			"200000": {
+				records: []ruleRecord{
+					{BINPayerTypeID: int64Pointer(3)},
+				},
+				isTest: true,
 			},
-		},
-		testBINs: map[string]bool{
-			"100000": true,
-			"200000": true,
 		},
 	}
 	gate := testGate(backend, ModeLive)
@@ -173,6 +178,28 @@ func TestGateBooleanCompatibilityMethods(t *testing.T) {
 	}
 	if gate.IsTestPayor("") {
 		t.Fatal("empty BIN must not be a test payer")
+	}
+}
+
+func TestClassifyReadsOneCorrelatedBINView(t *testing.T) {
+	backend := &fakeBackend{
+		data: map[string]binRules{
+			"100000": {
+				records: []ruleRecord{
+					{BINPayerTypeID: int64Pointer(3)},
+					{PCN: "PCNX", PCNPayerTypeID: int64Pointer(3)},
+				},
+				isTest: true,
+			},
+		},
+	}
+	gate := testGate(backend, ModeSnapshot)
+
+	if got := gate.Classify("100000", "PCNX", "GROUP"); got != ClassificationTest {
+		t.Fatalf("Classify = %q, want %q", got, ClassificationTest)
+	}
+	if backend.rulesCalls != 1 {
+		t.Fatalf("Classify made %d backend reads, want exactly 1", backend.rulesCalls)
 	}
 }
 
@@ -392,5 +419,11 @@ func TestPayerTypeSQLUsesQualifiedNormalizedRules(t *testing.T) {
 		if !strings.Contains(query, required) {
 			t.Fatalf("payerTypeSQL missing %q", required)
 		}
+	}
+	if count := strings.Count(query, `UPPER(TRIM(rdp.BIN)) AS "key"`); count != 2 {
+		t.Fatalf("payerTypeSQL BIN cache-key count = %d, want 2", count)
+	}
+	if strings.Contains(query, `|| '..' AS "key"`) {
+		t.Fatal("payerTypeSQL must key the live cache by BIN, not composite lookup key")
 	}
 }
