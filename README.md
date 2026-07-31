@@ -185,6 +185,45 @@ first. `IsTestPayor(bin)` is an independent predicate that stays true regardless
 All rules and the test-payer signal for a BIN come from one immutable cache view, so a refresh
 cannot mix payer data from one ruleset with test status from another.
 
+### Health
+
+`gate.RuleCount()` reports how many RULEDATA rows are loaded right now. It always reflects the
+ruleset in effect, including after an automatic background refresh in Live mode, so a service can
+alarm on an empty cache:
+
+```go
+if gate.RuleCount() == 0 {
+    logger.Errorw("cashgate ruleset is empty; every lookup will answer unknown-bin")
+}
+```
+
+The count comes only from the rule cache itself and does not consult `IsEnabled`, so it stays a
+straight cache-health signal. A gate with no cache at all — `Disabled`, or a nil `*Gate` — has
+nothing loaded and reports `0`. Treat it as a diagnostic call, not a hot-path one: in Live mode it
+walks the cache's current view rather than reading a counter.
+
+### Refresh errors
+
+An automatic refresh has no caller to return an error to, so Live mode reports failures by
+callback. `OnRefreshError` fires after **every** failed automatic refresh, so a service learns its
+ruleset is stale immediately rather than only once failures pile up:
+
+```go
+gate.OnRefreshError(func(err error, consecutiveFailures int) {
+    logger.Warnw("cashgate refresh failed; serving previous ruleset",
+        "error", err, "consecutiveFailures", consecutiveFailures)
+})
+```
+
+`consecutiveFailures` resets to zero on the next successful refresh, so `1` is the first failure of
+a new streak. The handler runs on the refresh goroutine — return promptly and do real work
+elsewhere. It is not invoked for the initial load in `New` (which returns an error) or for
+`ForceRefresh` (which returns its error directly).
+
+The gate keeps serving the last good ruleset through failures rather than degrading itself, so
+classifications stay stale-but-correct instead of suddenly blind. Deciding when that is no longer
+acceptable is the caller's call.
+
 ### Resilience
 
 In Live mode, register a halt action for persistent refresh failure:
@@ -198,6 +237,9 @@ gate.OnPersistentRefreshFailure(func(err error) {
 
 It fires **once**, when consecutive refresh failures reach `PersistentRefreshFailureThreshold` (3).
 Until then the gate keeps serving the last good ruleset.
+
+The two callbacks compose — registering one does not unregister the other — so a service can log
+every failure and halt on persistent ones. Passing `nil` clears a registration.
 
 ### Data source
 
