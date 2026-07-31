@@ -91,10 +91,18 @@ const (
 
 // Gate classifies BIN/PCN/group values against an in-memory ruleset.
 type Gate struct {
-	backend  gateBackend
-	mode     Mode
-	enabled  bool
-	haltOnce sync.Once
+	backend gateBackend
+	mode    Mode
+	enabled bool
+
+	// The backend holds one refresh-error handler, so the Gate multiplexes its
+	// own handlers behind a single registration. handlerMu guards the handler
+	// fields; it is not held while a handler runs.
+	handlerMu  sync.Mutex
+	onError    func(error, int)
+	onHalt     func(error)
+	dispatched bool
+	haltOnce   sync.Once
 }
 
 // New constructs a fail-closed Gate and synchronously loads its initial
@@ -222,6 +230,25 @@ func (g *Gate) IsTestPayor(bin string) bool {
 	return bin != "" && g.backend.rulesForBIN(bin).isTest
 }
 
+// RuleCount reports how many RULEDATA rows the gate currently has loaded. It
+// always reflects the ruleset in effect right now, including after an automatic
+// background refresh in ModeLive, so callers can treat it as a health signal: a
+// zero count on a gate that has a ruleset means the ruleset is empty and every
+// lookup will answer ClassificationUnknownBIN.
+//
+// The count is derived solely from the presence and contents of the rule cache,
+// deliberately independent of IsEnabled: a gate with no cache at all — Disabled,
+// or a nil Gate — has nothing loaded and reports 0.
+//
+// This is a diagnostic call, not a hot-path one; in ModeLive it walks the
+// cache's current view rather than reading a counter.
+func (g *Gate) RuleCount() int {
+	if g == nil || g.backend == nil {
+		return 0
+	}
+	return g.backend.ruleCount()
+}
+
 // ForceRefresh synchronously replaces the current ruleset. In ModeSnapshot it
 // is the only refresh mechanism. In ModeLive it delegates to snowflake-cache.
 // It is a no-op for Disabled.
@@ -235,25 +262,82 @@ func (g *Gate) ForceRefresh() error {
 	return nil
 }
 
+// OnRefreshError registers a handler invoked after every failed automatic
+// refresh in ModeLive, so a caller learns about a stale ruleset immediately
+// rather than only once failures become persistent. err is the underlying
+// failure; consecutiveFailures is the running count, which resets to zero on the
+// next successful refresh, so a value of 1 is the first failure of a new streak.
+//
+// The handler runs on the refresh goroutine: return promptly and do the real
+// work elsewhere. It is never invoked for the initial synchronous load in New,
+// which reports failure by returning an error, nor for ForceRefresh, which
+// returns its error directly to the caller.
+//
+// This composes with OnPersistentRefreshFailure; registering one does not
+// unregister the other. A nil handler clears this registration. Snapshot and
+// Disabled gates have no automatic refresh and therefore ignore it.
+func (g *Gate) OnRefreshError(handler func(err error, consecutiveFailures int)) {
+	if !g.supportsAutomaticRefresh() {
+		return
+	}
+	g.handlerMu.Lock()
+	defer g.handlerMu.Unlock()
+	g.onError = handler
+	g.syncRefreshDispatchLocked()
+}
+
 // OnPersistentRefreshFailure registers the Live-mode halt action. The Gate
 // invokes it once when the consecutive failure count reaches
-// PersistentRefreshFailureThreshold. Snapshot and Disabled gates have no
-// background refresh and therefore ignore this registration.
+// PersistentRefreshFailureThreshold. Use OnRefreshError instead to observe every
+// failure. Snapshot and Disabled gates have no background refresh and therefore
+// ignore this registration.
 func (g *Gate) OnPersistentRefreshFailure(onHalt func(error)) {
-	if !g.IsEnabled() || g.mode != ModeLive {
+	if !g.supportsAutomaticRefresh() {
 		return
 	}
-	if onHalt == nil {
-		g.backend.onRefreshError(nil)
-		return
-	}
-	g.backend.onRefreshError(func(err error, consecutiveFailures int) {
-		if consecutiveFailures >= PersistentRefreshFailureThreshold {
-			g.haltOnce.Do(func() {
-				onHalt(err)
-			})
+	g.handlerMu.Lock()
+	defer g.handlerMu.Unlock()
+	g.onHalt = onHalt
+	g.syncRefreshDispatchLocked()
+}
+
+func (g *Gate) supportsAutomaticRefresh() bool {
+	return g != nil && g.backend != nil && g.mode == ModeLive
+}
+
+// syncRefreshDispatchLocked installs one backend handler that fans out to every
+// registered Gate handler, or clears the registration once none remain. The
+// dispatcher is installed at most once so a later registration cannot drop an
+// earlier one.
+func (g *Gate) syncRefreshDispatchLocked() {
+	if g.onError == nil && g.onHalt == nil {
+		if g.dispatched {
+			g.backend.onRefreshError(nil)
+			g.dispatched = false
 		}
-	})
+		return
+	}
+	if g.dispatched {
+		return
+	}
+	g.backend.onRefreshError(g.dispatchRefreshError)
+	g.dispatched = true
+}
+
+func (g *Gate) dispatchRefreshError(err error, consecutiveFailures int) {
+	g.handlerMu.Lock()
+	onError := g.onError
+	onHalt := g.onHalt
+	g.handlerMu.Unlock()
+
+	if onError != nil {
+		onError(err, consecutiveFailures)
+	}
+	if onHalt != nil && consecutiveFailures >= PersistentRefreshFailureThreshold {
+		g.haltOnce.Do(func() {
+			onHalt(err)
+		})
+	}
 }
 
 func normalizeConfig(cfg Config) (Config, error) {

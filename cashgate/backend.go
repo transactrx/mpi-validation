@@ -77,6 +77,7 @@ func compileBINRules(records []ruleRecord) binRules {
 
 type gateBackend interface {
 	rulesForBIN(bin string) binRules
+	ruleCount() int
 	forceRefresh() error
 	onRefreshError(handler func(error, int))
 }
@@ -132,6 +133,13 @@ func (b *liveBackend) rulesForBIN(bin string) binRules {
 	return rules
 }
 
+// ruleCount reports the RULEDATA row count in the cache's current view. It
+// reads through snowflake-cache, so it always reflects the most recent
+// background refresh.
+func (b *liveBackend) ruleCount() int {
+	return len(b.cache.GetAll())
+}
+
 func (b *liveBackend) forceRefresh() error {
 	if err := b.cache.ForceRefresh(); err != nil {
 		return err
@@ -149,6 +157,9 @@ type snapshotBackend struct {
 	query string
 	mu    sync.RWMutex
 	byBIN map[string]binRules
+	// records is the RULEDATA row count behind byBIN, kept so ruleCount reports
+	// the same unit as the live backend rather than a distinct-BIN count.
+	records int
 }
 
 func newSnapshotBackend(db *sql.DB, cfg Config) (*snapshotBackend, error) {
@@ -166,6 +177,12 @@ func (b *snapshotBackend) rulesForBIN(bin string) binRules {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.byBIN[normalizeKeyPart(bin)]
+}
+
+func (b *snapshotBackend) ruleCount() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.records
 }
 
 func (b *snapshotBackend) forceRefresh() error {
@@ -228,16 +245,19 @@ func (b *snapshotBackend) reload() error {
 	}
 
 	byBIN := make(map[string]binRules, len(rawByBIN))
+	total := 0
 	for bin, records := range rawByBIN {
 		byBIN[bin] = compileBINRules(records)
+		total += len(records)
 	}
-	b.replace(byBIN)
+	b.replace(byBIN, total)
 	return nil
 }
 
-func (b *snapshotBackend) replace(byBIN map[string]binRules) {
+func (b *snapshotBackend) replace(byBIN map[string]binRules, records int) {
 	b.mu.Lock()
 	b.byBIN = byBIN
+	b.records = records
 	b.mu.Unlock()
 }
 
