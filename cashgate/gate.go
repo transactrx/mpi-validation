@@ -89,12 +89,71 @@ const (
 	PayerTypeNonAdjudicatedCash int64 = 1465449159205023744
 )
 
+// refreshHandlerKind names which registration currently owns the rule cache's
+// single refresh-error handler slot.
+type refreshHandlerKind int
+
+const (
+	refreshHandlerNone refreshHandlerKind = iota
+	refreshHandlerError
+	refreshHandlerHalt
+)
+
+func (k refreshHandlerKind) String() string {
+	switch k {
+	case refreshHandlerError:
+		return "OnRefreshError"
+	case refreshHandlerHalt:
+		return "OnPersistentRefreshFailure"
+	default:
+		return "none"
+	}
+}
+
 // Gate classifies BIN/PCN/group values against an in-memory ruleset.
 type Gate struct {
 	backend  gateBackend
 	mode     Mode
 	enabled  bool
 	haltOnce sync.Once
+
+	// The rule cache holds exactly one refresh-error handler, so OnRefreshError
+	// and OnPersistentRefreshFailure compete for one slot. handlerKind records
+	// the winner so the losing registration can panic instead of being silently
+	// orphaned. handlerMu guards it; it is never held while a handler runs.
+	handlerMu   sync.Mutex
+	handlerKind refreshHandlerKind
+}
+
+// claimRefreshHandler reserves the rule cache's single refresh-error handler slot
+// for kind. Re-registering the same kind replaces the previous handler and is
+// allowed; claiming the slot while the other kind holds it panics, because the
+// alternative is silently discarding a handler the caller believes is armed.
+// Registration happens at startup, so a panic surfaces the misuse immediately
+// rather than at the first refresh failure in production.
+//
+// A nil handler releases the slot, so a caller may switch registrations by
+// clearing the current one first.
+func (g *Gate) claimRefreshHandler(kind refreshHandlerKind, clearing bool) {
+	g.handlerMu.Lock()
+	defer g.handlerMu.Unlock()
+
+	if clearing {
+		if g.handlerKind == kind {
+			g.handlerKind = refreshHandlerNone
+		}
+		return
+	}
+	if g.handlerKind != refreshHandlerNone && g.handlerKind != kind {
+		panic(fmt.Sprintf(
+			"cashgate: %s and %s are mutually exclusive — the rule cache holds one "+
+				"refresh-error handler, so register either one or the other, not both "+
+				"(%s is already registered; pass it nil first to switch). To log every "+
+				"failure and halt on persistent ones, register only %s and check "+
+				"consecutiveFailures >= PersistentRefreshFailureThreshold yourself.",
+			refreshHandlerError, refreshHandlerHalt, g.handlerKind, refreshHandlerError))
+	}
+	g.handlerKind = kind
 }
 
 // New constructs a fail-closed Gate and synchronously loads its initial
@@ -222,6 +281,25 @@ func (g *Gate) IsTestPayor(bin string) bool {
 	return bin != "" && g.backend.rulesForBIN(bin).isTest
 }
 
+// RuleCount reports how many RULEDATA rows the gate currently has loaded. It
+// always reflects the ruleset in effect right now, including after an automatic
+// background refresh in ModeLive, so callers can treat it as a health signal: a
+// zero count on a gate that has a ruleset means the ruleset is empty and every
+// lookup will answer ClassificationUnknownBIN.
+//
+// The count is derived solely from the presence and contents of the rule cache,
+// deliberately independent of IsEnabled: a gate with no cache at all — Disabled,
+// or a nil Gate — has nothing loaded and reports 0.
+//
+// This is a diagnostic call, not a hot-path one; in ModeLive it walks the
+// cache's current view rather than reading a counter.
+func (g *Gate) RuleCount() int {
+	if g == nil || g.backend == nil {
+		return 0
+	}
+	return g.backend.ruleCount()
+}
+
 // ForceRefresh synchronously replaces the current ruleset. In ModeSnapshot it
 // is the only refresh mechanism. In ModeLive it delegates to snowflake-cache.
 // It is a no-op for Disabled.
@@ -235,14 +313,46 @@ func (g *Gate) ForceRefresh() error {
 	return nil
 }
 
+// OnRefreshError registers a handler invoked after every failed automatic
+// refresh in ModeLive, so a caller learns about a stale ruleset immediately
+// rather than only once failures become persistent. err is the underlying
+// failure; consecutiveFailures is the running count, which resets to zero on the
+// next successful refresh, so a value of 1 is the first failure of a new streak.
+//
+// The handler runs on the refresh goroutine: return promptly and do the real
+// work elsewhere. It is never invoked for the initial synchronous load in New,
+// which reports failure by returning an error, nor for ForceRefresh, which
+// returns its error directly to the caller.
+//
+// NOTE: this and OnPersistentRefreshFailure share the rule cache's single
+// refresh-error handler slot, so they are mutually exclusive: registering this
+// one while OnPersistentRefreshFailure is registered panics. Use this handler
+// when you want both behaviors — consecutiveFailures gives you everything needed
+// to implement a halt action yourself.
+//
+// A nil handler clears this registration and releases the slot, so a caller may
+// switch to OnPersistentRefreshFailure by clearing this one first. Snapshot and
+// Disabled gates have no automatic refresh and therefore ignore it.
+func (g *Gate) OnRefreshError(handler func(err error, consecutiveFailures int)) {
+	if !g.IsEnabled() || g.mode != ModeLive {
+		return
+	}
+	g.claimRefreshHandler(refreshHandlerError, handler == nil)
+	g.backend.onRefreshError(handler)
+}
+
 // OnPersistentRefreshFailure registers the Live-mode halt action. The Gate
 // invokes it once when the consecutive failure count reaches
 // PersistentRefreshFailureThreshold. Snapshot and Disabled gates have no
 // background refresh and therefore ignore this registration.
+//
+// NOTE: this and OnRefreshError are mutually exclusive — registering both panics.
+// See OnRefreshError.
 func (g *Gate) OnPersistentRefreshFailure(onHalt func(error)) {
 	if !g.IsEnabled() || g.mode != ModeLive {
 		return
 	}
+	g.claimRefreshHandler(refreshHandlerHalt, onHalt == nil)
 	if onHalt == nil {
 		g.backend.onRefreshError(nil)
 		return

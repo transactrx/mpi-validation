@@ -179,6 +179,7 @@ func TestSnapshotConcurrentReadsAndReplacement(t *testing.T) {
 		map[string]binRules{
 			"100000": compileBINRules([]ruleRecord{{BINPayerTypeID: cash}}),
 		},
+		1,
 	)
 	gate := testGate(backend, ModeSnapshot)
 
@@ -213,6 +214,7 @@ func TestSnapshotConcurrentReadsAndReplacement(t *testing.T) {
 					map[string]binRules{
 						"100000": compileBINRules([]ruleRecord{{BINPayerTypeID: cash}}),
 					},
+					1,
 				)
 				continue
 			}
@@ -223,6 +225,7 @@ func TestSnapshotConcurrentReadsAndReplacement(t *testing.T) {
 						Name:           stringPointer("Test Commercial Plan"),
 					}}),
 				},
+				1,
 			)
 		}
 	}()

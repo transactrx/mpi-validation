@@ -9,6 +9,7 @@ import (
 
 type fakeBackend struct {
 	data           map[string]binRules
+	rules          int
 	rulesCalls     int
 	forceErr       error
 	forceCalls     int
@@ -18,6 +19,10 @@ type fakeBackend struct {
 func (b *fakeBackend) rulesForBIN(bin string) binRules {
 	b.rulesCalls++
 	return b.data[normalizeKeyPart(bin)]
+}
+
+func (b *fakeBackend) ruleCount() int {
+	return b.rules
 }
 
 func (b *fakeBackend) forceRefresh() error {
