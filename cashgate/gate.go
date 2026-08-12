@@ -89,20 +89,71 @@ const (
 	PayerTypeNonAdjudicatedCash int64 = 1465449159205023744
 )
 
+// refreshHandlerKind names which registration currently owns the rule cache's
+// single refresh-error handler slot.
+type refreshHandlerKind int
+
+const (
+	refreshHandlerNone refreshHandlerKind = iota
+	refreshHandlerError
+	refreshHandlerHalt
+)
+
+func (k refreshHandlerKind) String() string {
+	switch k {
+	case refreshHandlerError:
+		return "OnRefreshError"
+	case refreshHandlerHalt:
+		return "OnPersistentRefreshFailure"
+	default:
+		return "none"
+	}
+}
+
 // Gate classifies BIN/PCN/group values against an in-memory ruleset.
 type Gate struct {
-	backend gateBackend
-	mode    Mode
-	enabled bool
+	backend  gateBackend
+	mode     Mode
+	enabled  bool
+	haltOnce sync.Once
 
-	// The backend holds one refresh-error handler, so the Gate multiplexes its
-	// own handlers behind a single registration. handlerMu guards the handler
-	// fields; it is not held while a handler runs.
-	handlerMu  sync.Mutex
-	onError    func(error, int)
-	onHalt     func(error)
-	dispatched bool
-	haltOnce   sync.Once
+	// The rule cache holds exactly one refresh-error handler, so OnRefreshError
+	// and OnPersistentRefreshFailure compete for one slot. handlerKind records
+	// the winner so the losing registration can panic instead of being silently
+	// orphaned. handlerMu guards it; it is never held while a handler runs.
+	handlerMu   sync.Mutex
+	handlerKind refreshHandlerKind
+}
+
+// claimRefreshHandler reserves the rule cache's single refresh-error handler slot
+// for kind. Re-registering the same kind replaces the previous handler and is
+// allowed; claiming the slot while the other kind holds it panics, because the
+// alternative is silently discarding a handler the caller believes is armed.
+// Registration happens at startup, so a panic surfaces the misuse immediately
+// rather than at the first refresh failure in production.
+//
+// A nil handler releases the slot, so a caller may switch registrations by
+// clearing the current one first.
+func (g *Gate) claimRefreshHandler(kind refreshHandlerKind, clearing bool) {
+	g.handlerMu.Lock()
+	defer g.handlerMu.Unlock()
+
+	if clearing {
+		if g.handlerKind == kind {
+			g.handlerKind = refreshHandlerNone
+		}
+		return
+	}
+	if g.handlerKind != refreshHandlerNone && g.handlerKind != kind {
+		panic(fmt.Sprintf(
+			"cashgate: %s and %s are mutually exclusive — the rule cache holds one "+
+				"refresh-error handler, so register either one or the other, not both "+
+				"(%s is already registered; pass it nil first to switch). To log every "+
+				"failure and halt on persistent ones, register only %s and check "+
+				"consecutiveFailures >= PersistentRefreshFailureThreshold yourself.",
+			refreshHandlerError, refreshHandlerHalt, g.handlerKind, refreshHandlerError))
+	}
+	g.handlerKind = kind
 }
 
 // New constructs a fail-closed Gate and synchronously loads its initial
@@ -273,71 +324,46 @@ func (g *Gate) ForceRefresh() error {
 // which reports failure by returning an error, nor for ForceRefresh, which
 // returns its error directly to the caller.
 //
-// This composes with OnPersistentRefreshFailure; registering one does not
-// unregister the other. A nil handler clears this registration. Snapshot and
+// NOTE: this and OnPersistentRefreshFailure share the rule cache's single
+// refresh-error handler slot, so they are mutually exclusive: registering this
+// one while OnPersistentRefreshFailure is registered panics. Use this handler
+// when you want both behaviors — consecutiveFailures gives you everything needed
+// to implement a halt action yourself.
+//
+// A nil handler clears this registration and releases the slot, so a caller may
+// switch to OnPersistentRefreshFailure by clearing this one first. Snapshot and
 // Disabled gates have no automatic refresh and therefore ignore it.
 func (g *Gate) OnRefreshError(handler func(err error, consecutiveFailures int)) {
-	if !g.supportsAutomaticRefresh() {
+	if !g.IsEnabled() || g.mode != ModeLive {
 		return
 	}
-	g.handlerMu.Lock()
-	defer g.handlerMu.Unlock()
-	g.onError = handler
-	g.syncRefreshDispatchLocked()
+	g.claimRefreshHandler(refreshHandlerError, handler == nil)
+	g.backend.onRefreshError(handler)
 }
 
 // OnPersistentRefreshFailure registers the Live-mode halt action. The Gate
 // invokes it once when the consecutive failure count reaches
-// PersistentRefreshFailureThreshold. Use OnRefreshError instead to observe every
-// failure. Snapshot and Disabled gates have no background refresh and therefore
-// ignore this registration.
+// PersistentRefreshFailureThreshold. Snapshot and Disabled gates have no
+// background refresh and therefore ignore this registration.
+//
+// NOTE: this and OnRefreshError are mutually exclusive — registering both panics.
+// See OnRefreshError.
 func (g *Gate) OnPersistentRefreshFailure(onHalt func(error)) {
-	if !g.supportsAutomaticRefresh() {
+	if !g.IsEnabled() || g.mode != ModeLive {
 		return
 	}
-	g.handlerMu.Lock()
-	defer g.handlerMu.Unlock()
-	g.onHalt = onHalt
-	g.syncRefreshDispatchLocked()
-}
-
-func (g *Gate) supportsAutomaticRefresh() bool {
-	return g != nil && g.backend != nil && g.mode == ModeLive
-}
-
-// syncRefreshDispatchLocked installs one backend handler that fans out to every
-// registered Gate handler, or clears the registration once none remain. The
-// dispatcher is installed at most once so a later registration cannot drop an
-// earlier one.
-func (g *Gate) syncRefreshDispatchLocked() {
-	if g.onError == nil && g.onHalt == nil {
-		if g.dispatched {
-			g.backend.onRefreshError(nil)
-			g.dispatched = false
+	g.claimRefreshHandler(refreshHandlerHalt, onHalt == nil)
+	if onHalt == nil {
+		g.backend.onRefreshError(nil)
+		return
+	}
+	g.backend.onRefreshError(func(err error, consecutiveFailures int) {
+		if consecutiveFailures >= PersistentRefreshFailureThreshold {
+			g.haltOnce.Do(func() {
+				onHalt(err)
+			})
 		}
-		return
-	}
-	if g.dispatched {
-		return
-	}
-	g.backend.onRefreshError(g.dispatchRefreshError)
-	g.dispatched = true
-}
-
-func (g *Gate) dispatchRefreshError(err error, consecutiveFailures int) {
-	g.handlerMu.Lock()
-	onError := g.onError
-	onHalt := g.onHalt
-	g.handlerMu.Unlock()
-
-	if onError != nil {
-		onError(err, consecutiveFailures)
-	}
-	if onHalt != nil && consecutiveFailures >= PersistentRefreshFailureThreshold {
-		g.haltOnce.Do(func() {
-			onHalt(err)
-		})
-	}
+	})
 }
 
 func normalizeConfig(cfg Config) (Config, error) {

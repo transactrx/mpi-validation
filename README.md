@@ -218,7 +218,8 @@ gate.OnRefreshError(func(err error, consecutiveFailures int) {
 `consecutiveFailures` resets to zero on the next successful refresh, so `1` is the first failure of
 a new streak. The handler runs on the refresh goroutine — return promptly and do real work
 elsewhere. It is not invoked for the initial load in `New` (which returns an error) or for
-`ForceRefresh` (which returns its error directly).
+`ForceRefresh` (which returns its error directly). It cannot be combined with
+`OnPersistentRefreshFailure` — see [Resilience](#resilience).
 
 The gate keeps serving the last good ruleset through failures rather than degrading itself, so
 classifications stay stale-but-correct instead of suddenly blind. Deciding when that is no longer
@@ -238,8 +239,27 @@ gate.OnPersistentRefreshFailure(func(err error) {
 It fires **once**, when consecutive refresh failures reach `PersistentRefreshFailureThreshold` (3).
 Until then the gate keeps serving the last good ruleset.
 
-The two callbacks compose — registering one does not unregister the other — so a service can log
-every failure and halt on persistent ones. Passing `nil` clears a registration.
+**`OnRefreshError` and `OnPersistentRefreshFailure` are mutually exclusive.** They share the rule
+cache's single handler slot, so registering one while the other is registered **panics** rather
+than silently orphaning a callback you believe is armed. Registration happens at startup, so the
+misuse fails on boot instead of at the first refresh failure.
+
+Re-registering the same callback replaces your own handler and is fine. Passing `nil` clears the
+registration and releases the slot, so you can switch from one to the other by clearing first.
+
+If you want both behaviors, register only `OnRefreshError` and use `consecutiveFailures` to halt
+yourself:
+
+```go
+var haltOnce sync.Once
+gate.OnRefreshError(func(err error, consecutiveFailures int) {
+    logger.Warnw("cashgate refresh failed; serving previous ruleset",
+        "error", err, "consecutiveFailures", consecutiveFailures)
+    if consecutiveFailures >= cashgate.PersistentRefreshFailureThreshold {
+        haltOnce.Do(func() { shutdown() })
+    }
+})
+```
 
 ### Data source
 
